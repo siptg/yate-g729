@@ -49,12 +49,10 @@ G729Codec::G729Codec(const char *sFormat, const char *dFormat, bool encoding)
     Debug(DebugAll,R"(G729Codec::G729Codec("%s","%s",%scoding) [%p])",
           sFormat,dFormat, encoding ? "en" : "de", this);
 
-    if (encoding) {
+    if (encoding)
         encoder = initBcg729EncoderChannel(0);
-    }
-    else {
+    else
         decoder = initBcg729DecoderChannel();
-    }
     // gcc way to say ++count atomically
     __sync_add_and_fetch(&count, 1);
 }
@@ -96,8 +94,7 @@ unsigned long G729Codec::Consume(const DataBlock& data, unsigned long tStamp, un
         }
         if (!tStamp)
             tStamp = timeStamp() + (consumed / 2);
-    }
-    else {
+    } else {
         frames = m_data.length() / sizeof(g729_frame);
         consumed = frames * sizeof(g729_frame);
         if (frames) {

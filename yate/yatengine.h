@@ -458,6 +458,16 @@ public:
      */
     int decode(const char* str, bool& received, const char* id);
 
+   /**
+    * Helper functions to prevent waiting while work with external modules
+    */
+    bool defer() const
+        { return m_last_handler; }
+    void setMsgHolder(void* msg_holder)
+        { m_msg_holder = msg_holder; }
+    void* getMsgHolder() const
+        { return m_msg_holder; }
+
 protected:
     /**
      * Notify the message it has been dispatched.
@@ -477,6 +487,8 @@ private:
     bool m_broadcast;
     void commonEncode(String& str) const;
     int commonDecode(const char* str, int offs);
+    ObjList* m_last_handler;
+    void* m_msg_holder;
 };
 
 /**
@@ -553,9 +565,15 @@ public:
 	{ return m_filter; }
 
     /**
+     * Retrieve the Regexp filter (if installed) associated to this handler
+     */
+    inline const Regexp* filterRegexp() const
+	{ return m_filterRegexp; }
+
+    /**
      * Set a filter for this handler
      * @param filter Pointer to the filter to install, will be owned and
-     *  destroyed by the handler
+     *  destroyed by the handler. The filter may be a NamedPointer carrying a Regexp
      */
     void setFilter(NamedString* filter);
 
@@ -571,6 +589,11 @@ public:
      * Remove and destroy any filter associated to this handler
      */
     void clearFilter();
+
+    virtual void cancelDeferred(Message& msg) {}
+
+    virtual bool deferSupport() const
+        { return false; }
 
 protected:
     /**
@@ -597,7 +620,9 @@ private:
     int m_unsafe;
     MessageDispatcher* m_dispatcher;
     NamedString* m_filter;
+    Regexp* m_filterRegexp;
     NamedCounter* m_counter;
+    ObjList m_deferred_messages;
 };
 
 /**
@@ -614,6 +639,11 @@ public:
      * @return True to stop processing, false to try other handlers
      */
     virtual bool received(Message& msg, int id) = 0;
+
+    virtual void cancelDeferred(Message& msg) {}
+
+    virtual bool deferSupport() const
+        { return false; }
 };
 
 /**
@@ -661,6 +691,12 @@ public:
      * @return True if message was processed
      */
     virtual bool receivedInternal(Message& msg);
+
+    virtual void cancelDeferred(Message& msg)
+        { if (m_receiver) m_receiver->cancelDeferred(msg); }
+
+    virtual bool deferSupport() const
+        { return m_receiver && m_receiver->deferSupport(); }
 
 private:
     MessageReceiver* m_receiver;
@@ -754,9 +790,10 @@ public:
      * Note that in some cases when a handler is removed from the list
      *  other handlers with equal priority may be called twice.
      * @param msg The message to dispatch
+     * @param defer Defer the message if possible
      * @return True if one handler accepted it, false if all ignored
      */
-    bool dispatch(Message& msg);
+    bool dispatch(Message& msg, bool defer = false);
 
     /**
      * Put a message in the waiting queue for asynchronous dispatching
@@ -788,6 +825,27 @@ public:
      */
     inline void clear()
 	{ m_handlers.clear(); m_hookAppend = &m_hooks; m_hooks.clear(); }
+
+    /**
+     * Check if there is at least one message in the queue
+     * @return True if the queue holds at least one message
+     */
+    inline bool hasMessages() const
+	{ return m_messages.get() || m_messages.next(); }
+
+    /**
+     * Check if there is at least one handler installed
+     * @return True if at least one handler is installed
+     */
+    inline bool hasHandlers() const
+	{ return m_handlers.get() || m_handlers.next(); }
+
+    /**
+     * Check if there is at least one message hook installed
+     * @return True if at least one hook is installed
+     */
+    inline bool hasHooks() const
+	{ return m_hooks.get() || m_hooks.next(); }
 
     /**
      * Get the number of messages waiting in the queue
@@ -1570,6 +1628,14 @@ public:
      */
     inline void getStats(u_int64_t& enqueued, u_int64_t& dequeued, u_int64_t& dispatched, u_int64_t& queueMax)
 	{ m_dispatcher.getStats(enqueued,dequeued,dispatched,queueMax); }
+
+    /**
+     * Check if a plugin is currently loaded
+     * @param name Name of the plugin to check
+     * @return True if the named plugin is loaded
+     */
+    inline bool pluginLoaded(const String& name) const
+	{ return !!m_libs[name]; }
 
     /**
      * Loads the plugins from an extra plugins directory or just an extra plugin

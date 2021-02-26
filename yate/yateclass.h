@@ -87,6 +87,7 @@ typedef unsigned long in_addr_t;
 #define snprintf _snprintf
 #define strdup _strdup
 #define strtoll _strtoi64
+#define strtoull _strtoui64
 #define open _open
 #define dup2 _dup2
 #define read _read
@@ -96,6 +97,7 @@ typedef unsigned long in_addr_t;
 #define chdir _chdir
 #define mkdir(p,m) _mkdir(p)
 #define unlink _unlink
+#define llabs _abs64
 
 #define O_RDWR   _O_RDWR
 #define O_RDONLY _O_RDONLY
@@ -562,6 +564,169 @@ YATE_API void Alarm(const DebugEnabler* component, const char* info, int level, 
 YATE_API void Output(const char* format, ...) FORMAT_CHECK(1);
 
 /**
+ * Outputs a debug string with a trace ID.
+ * @param traceId The trace ID associated with this message
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+YATE_API void TraceDebug(const char* traceId, int level, const char* format, ...) FORMAT_CHECK(3);
+
+/**
+ * Outputs a debug string with a trace ID.
+ * @param traceId The trace ID associated with this message
+ * @param facility Facility that outputs the message
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+YATE_API void TraceDebug(const char* traceId, const char* facility, int level,
+            const char* format, ...) FORMAT_CHECK(4);
+
+/**
+ * Outputs a debug string with a trace ID.
+ * @param traceId The trace ID associated with this message
+ * @param local Pointer to a DebugEnabler holding current debugging settings
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+YATE_API void TraceDebug(const char* traceId, const DebugEnabler* local, int level,
+            const char* format, ...) FORMAT_CHECK(4);
+
+
+#if 0 /* for documentation generator */
+/**
+ * Outputs a debug string with a trace ID.
+ * @param obj Object from where to get trace ID
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceDebugObj(GenObject* obj, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string with a trace ID.
+ * @param obj Object from where to get trace ID
+ * @param facility Facility that outputs the message
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceDebugObj(GenObject* obj, const char* facility, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string with a trace ID.
+ * @param obj Object from where to get trace ID
+ * @param local Pointer to a DebugEnabler holding current debugging settings
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceDebugObj(GenObject* obj, const DebugEnabler* local, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void Trace(GenObject* obj, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param facility Facility that outputs the message
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void Trace(GenObject* obj, const char* facility, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param local Pointer to a DebugEnabler holding current debugging settings
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void Trace(GenObject* obj, const DebugEnabler* local, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceObj(GenObject* obj, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param facility Facility that outputs the message
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceObj(GenObject* obj, const char* facility, int level, const char* format, ...);
+
+/**
+ * Outputs a debug string only if trace ID is valid.
+ * @param obj Object from where to get trace ID
+ * @param local Pointer to a DebugEnabler holding current debugging settings
+ * @param level The level of the message
+ * @param format A printf() style format string
+ */
+void TraceObj(GenObject* obj, const DebugEnabler* local, int level, const char* format, ...);
+
+#endif
+
+#define TraceDebugObj(pGenObj,...) \
+TraceDebug((!!(pGenObj)) ? (pGenObj)->traceId() : "",##__VA_ARGS__)
+
+#define Trace(traceId,...) \
+do { if (!TelEngine::null(traceId)) TraceDebug(traceId,##__VA_ARGS__); } while(false)
+
+#define TraceObj(pGenObj,...) \
+do { if (!!(pGenObj) && (pGenObj)->traceId()) TraceDebug((pGenObj)->traceId(),##__VA_ARGS__); } while (false)
+
+
+/**
+ * Outputs a debug string with trace ID and emits an alarm if a callback is installed
+ * @param traceId The trace ID associated with this message
+ * @param component Component that emits the alarm
+ * @param info Extra alarm information
+ * @param level The level of the alarm
+ * @param format A printf() style format string
+ */
+YATE_API void TraceAlarm(const char* traceId, const char* component, int level,
+            const char* format, ...) FORMAT_CHECK(4);
+
+/**
+ * Outputs a debug string with trace ID and emits an alarm if a callback is installed
+ * @param traceId The trace ID associated with this message
+ * @param component Pointer to a DebugEnabler holding component name and debugging settings
+ * @param level The level of the alarm
+ * @param format A printf() style format string
+ */
+YATE_API void TraceAlarm(const char* traceId, const DebugEnabler* component,
+            int level, const char* format, ...) FORMAT_CHECK(4);
+
+/**
+ * Outputs a debug string with trace ID and emits an alarm if a callback is installed
+ * @param traceId The trace ID associated with this message
+ * @param component Component that emits the alarm
+ * @param info Extra alarm information
+ * @param level The level of the alarm
+ * @param format A printf() style format string
+ */
+YATE_API void TraceAlarm(const char* traceId, const char* component, const char* info,
+            int level, const char* format, ...) FORMAT_CHECK(5);
+
+/**
+ * Outputs a debug string with trace ID and emits an alarm if a callback is installed
+ * @param traceId The trace ID associated with this message
+ * @param component Pointer to a DebugEnabler holding component name and debugging settings
+ * @param info Extra alarm information
+ * @param level The level of the alarm
+ * @param format A printf() style format string
+ */
+YATE_API void TraceAlarm(const char* traceId, const DebugEnabler* component,
+            const char* info, int level, const char* format, ...) FORMAT_CHECK(5);
+
+/**
  * This class is used as an automatic variable that logs messages on creation
  *  and destruction (when the instruction block is left or function returns).
  * IMPORTANT: the name is not copied so it should best be static.
@@ -843,6 +1008,41 @@ void operator=(const type&)
 
 
 /**
+ * Compute a hash for a 64-bit unsigned integer
+ * @param val Integer value to hash
+ * @return Hash value
+ */
+YATE_API inline uint32_t hashInt64(uint64_t val)
+{
+    return (uint32_t)(((val ^ (val >> 48)) ^ (val >> 32)) ^ (val >> 16));
+}
+
+/**
+ * Compute a hash for a 32-bit unsigned integer
+ * @param val Integer value to hash
+ * @return Hash value
+ */
+YATE_API inline uint32_t hashInt32(uint32_t val)
+{
+    return (uint32_t)((val ^ (val >> 16)) ^ (val << 16));
+}
+
+/**
+ * Compute a hash for a pointer
+ * @param val Pointer to hash
+ * @return Hash value
+ */
+YATE_API inline uint32_t hashPtr(const void* ptr)
+{
+#if (_WORDSIZE == 64)
+    return hashInt64((uintptr_t)ptr);
+#else
+    return hashInt32((uintptr_t)ptr);
+#endif
+}
+
+
+/**
  * An object with just a public virtual destructor
  */
 class YATE_API GenObject
@@ -879,6 +1079,12 @@ public:
      *  String) or some form of identification
      */
     virtual const String& toString() const;
+
+    /**
+     * Get the trace ID associated with this object
+     * @return The trace ID or an empty string
+     */
+    virtual const String& traceId() const;
 
     /**
      * Get a pointer to a derived class given that class name
@@ -2261,6 +2467,19 @@ public:
 	int64_t maxvalue = LLONG_MAX, bool clamp = true) const;
 
     /**
+     * Convert the string to an unsigned 64 bit integer value.
+     * @param defvalue Default to return if the string is not a number
+     * @param base Numeration base, 0 to autodetect
+     * @param minvalue Minimum value allowed
+     * @param maxvalue Maximum value allowed
+     * @param clamp Control the out of bound values: true to adjust to the nearest
+     *  bound, false to return the default value
+     * @return The unsigned 64 bit integer interpretation or defvalue.
+     */
+    uint64_t toUInt64(uint64_t defvalue = 0, int base = 0, uint64_t minvalue = 0,
+        uint64_t maxvalue = ULLONG_MAX, bool clamp = true) const;
+
+    /**
      * Convert the string to a floating point value.
      * @param defvalue Default to return if the string is not a number
      * @return The floating-point interpretation or defvalue.
@@ -3050,6 +3269,7 @@ YATE_API bool controlReturn(NamedList* params, bool ret, const char* retVal = 0)
  */
 class YATE_API Regexp : public String
 {
+    YCLASS(Regexp,String)
     friend class String;
 public:
     /**
@@ -3532,6 +3752,14 @@ public:
     ObjList* append(const GenObject* obj);
 
     /**
+     * Appends an object to the hashed list
+     * @param obj Pointer to the object to append
+     * @param hash Object hash used to identify the list into which this object should be inserted
+     * @return A pointer to the inserted list item
+     */
+    ObjList* append(const GenObject* obj, unsigned int hash);
+
+    /**
      * Delete the list item that holds a given object
      * @param obj Object to search in the list
      * @param delobj True to delete the object (default)
@@ -3549,6 +3777,19 @@ public:
     inline GenObject* remove(const String& str, bool delobj = true)
     {
 	ObjList* n = find(str);
+	return n ? n->remove(delobj) : 0;
+    }
+
+    /**
+     * Delete the item in the list that has the associated hash
+     * @param obj Object to search in the list
+     * @param hash Object hash used to identify the list from which to remove the object
+     * @param delobj True to delete the object (default)
+     * @return Pointer to the object if not destroyed
+     */
+    inline GenObject* remove(GenObject* obj, unsigned int hash, bool delobj = true)
+    {
+	ObjList* n = find(obj,hash);
 	return n ? n->remove(delobj) : 0;
     }
 
@@ -3928,9 +4169,10 @@ public:
 
     /**
      * Retrieve the difference between local time and UTC in seconds east of UTC
+     * @param when UNIX time for which to compute timezone, affects daylight saving
      * @return Difference between local time and UTC in seconds
      */
-    static int timeZone();
+    static int timeZone(u_int32_t when = secNow());
 
 private:
     u_int64_t m_time;
@@ -5789,6 +6031,31 @@ public:
     bool running() const;
 
     /**
+     * Get the affinity mask of this thread
+     * @param outCpuMask Bit mask specifying CPUs  on which the thread is running on. Bit 0 of octet 0 in DataBlock is CPU 0,
+     *   bit 1 in octet 0 is CPU 1,..., bit 0 in octet 2 is CPU 8, etc.
+     * @return 0 on success, error otherwise
+     */
+    int getAffinity(DataBlock& outCpuMask);
+
+    /**
+     * Set the affinity of this thread by using a string that specifies the
+     * allowed CPUs by listing them separated with commas or as ranges.
+     * Mixing ranges with list is allowed (e.g. 0,2,5-6,10)
+     * @param cpus String specifying CPUs on which this thread should run.
+     * @return 0 on success, error otherwise
+     */
+    int setAffinity(const String& cpus);
+
+    /**
+     * Set the affinity of this thread
+     * @param mask Bit mask specifying allowed CPUs kept in a DataBlock. Bit 0 of octet 0 in DataBlock is CPU 0,
+     *   bit 1 in octet 0 is CPU 1,..., bit 0 in octet 1 is CPU 8, etc.
+     * @return 0 on success, error otherwise
+     */
+    int setAffinity(const DataBlock& mask);
+
+    /**
      * Count how many Yate mutexes are kept locked by this thread
      * @return Number of Mutex locks held by this thread
      */
@@ -5813,6 +6080,57 @@ public:
      * @return The pointer that was passed in the thread's constructor
      */
     static const char* currentName();
+
+    /**
+     * Get the affinity mask of current thread
+     * @param outCpuMask Bit mask specifying CPUs  on which the current thread is running on. Bit 0 of octet 0 in DataBlock is CPU 0,
+     *   bit 1 in octet 0 is CPU 1,..., bit 0 in octet 1 is CPU 8, etc.
+     * @return 0 on success, error otherwise
+     */
+    static int getCurrentAffinity(DataBlock& outCpuMask);
+
+    /**
+     * Get the affinity mask of current thread
+     * @param outCpus String into which to put the affinity
+     * @param hex True to put it as octet string, false as comma-separated list of CPUs
+     * @return 0 on success, error otherwise
+     */
+    static int getCurrentAffinity(String& outCpus, bool hex = false);
+
+    /**
+     * Set the affinity of the current thread by using a string that specifies the
+     * allowed CPUs by listing them separated with commas or as ranges.
+     * Mixing ranges with list is allowed (e.g. 0,2,5-6,10)
+     * @param cpus String specifying CPUs on which this thread should run.
+     * @return 0 on success, error otherwise
+     */
+    static int setCurrentAffinity(const String& cpus);
+
+    /**
+     * Set the affinity of the current thread
+     * @param mask Bit mask specifying allowed CPUs kept in a DataBlock. Bit 0 of octet 0 in DataBlock is CPU 0,
+     *   bit 1 in octet 0 is CPU 1,..., bit 0 in octet 1 is CPU 8, etc.
+     * @return 0 on success, error otherwise
+     */
+    static int setCurrentAffinity(const DataBlock& mask);
+
+    /**
+     * Parse a CPU list into a bitmask held in a DataBlock.
+     * String is formated as a list of integers or integer ranges separated by commas..
+     * Mixing ranges with list is allowed (e.g. 0,2,5-6,10)
+     * @param cpus String specifying CPUs
+     * @param mask Output bitmask resulted from parsing.
+     * @return True if parsing succeeded, false otherwise
+     */
+    static bool parseCPUMask(const String& cpus, DataBlock& mask);
+
+    /**
+     * Stringify the CPU mask
+     * @param mask Mask to stringify
+     * @param str Output string
+     * @param hexa Output as hexadecimal string if set, otherwise build a list of comma separated CPUs
+     */
+    static void printCPUMask(const DataBlock& mask, String& str, bool hexa = true);
 
     /**
      * Give up the currently running timeslice. Note that on some platforms
@@ -6206,7 +6524,7 @@ public:
      * Retrieve address family name
      * @return Address family name
      */
-    inline const char* familyName()
+    inline const char* familyName() const
 	{ return lookupFamily(family()); }
 
     /**
