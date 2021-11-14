@@ -2,6 +2,7 @@
 
 #define  L_FRAME            80
 #define  L_FRAME_COMPRESSED 10
+#define  PKT_FRAMES          2
 typedef int16_t g729_block[L_FRAME];
 typedef uint8_t g729_frame[L_FRAME_COMPRESSED];
 
@@ -16,7 +17,8 @@ volatile int G729Codec::count = 0;
 G729Plugin::G729Plugin()
 : Plugin("g729codec") {
     Output("Loaded module G729 - based on Belledonne Communications");
-    const FormatInfo* f = FormatRepository::addFormat("g729", L_FRAME_COMPRESSED, L_FRAME * 1000 / 8);
+    const FormatInfo* f = FormatRepository::addFormat("g729", L_FRAME_COMPRESSED * PKT_FRAMES,
+        L_FRAME * 1000 / 8 * PKT_FRAMES);
     caps[0].src = caps[1].dest = f;
     caps[0].dest = caps[1].src = FormatRepository::getFormat("slin");
     caps[0].cost = caps[1].cost = 5;
@@ -81,7 +83,7 @@ unsigned long G729Codec::Consume(const DataBlock& data, unsigned long tStamp, un
     DataBlock outdata;
     size_t frames, consumed;
     if (encoder) {
-        frames = m_data.length() / sizeof(g729_block);
+        frames = (m_data.length() / sizeof(g729_block) / PKT_FRAMES) * PKT_FRAMES;
         consumed = frames * sizeof(g729_block);
         if (frames) {
             outdata.assign(nullptr, frames * sizeof(g729_frame));
