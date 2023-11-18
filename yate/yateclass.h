@@ -5,7 +5,7 @@
  * Base classes and types, not related to the engine or telephony
  *
  * Yet Another Telephony Engine - a fully featured software PBX and IVR
- * Copyright (C) 2004-2014 Null Team
+ * Copyright (C) 2004-2023 Null Team
  *
  * This software is distributed under multiple licenses;
  * see the COPYING file in the main directory for licensing
@@ -385,6 +385,12 @@ public:
      */
     void debugCopy(const DebugEnabler* original = 0);
 
+    /**
+     * Set debug from description
+     * @param desc Debug description. [level [NNN][+-]] or 'reset'
+     */
+    void debugSet(const char* desc);
+
 protected:
     /**
      * Set the current debug name
@@ -687,7 +693,6 @@ do { if (!!(pGenObj) && (pGenObj)->traceId()) TraceDebug((pGenObj)->traceId(),##
  * Outputs a debug string with trace ID and emits an alarm if a callback is installed
  * @param traceId The trace ID associated with this message
  * @param component Component that emits the alarm
- * @param info Extra alarm information
  * @param level The level of the alarm
  * @param format A printf() style format string
  */
@@ -877,6 +882,9 @@ struct TokenDict64 {
 class String;
 class DataBlock;
 class Mutex;
+class RWLock;
+class WLock;
+class RLock;
 class ObjList;
 class NamedCounter;
 
@@ -924,6 +932,36 @@ void YCLASS2(class type,class base1,class base2);
  * @param base3 Third base class that is inherited
  */
 void YCLASS3(class type,class base1,class base2,class base3);
+
+/**
+ * Macro to create a GenObject class from a base class and implement @ref GenObject::getObject
+ * Try to obtain something from a data member first
+ * @param dataPtr Pointer to member data variable
+ * @param type Class that is declared
+ * @param base Base class that is inherited
+ */
+void YCLASS_DATA(var dataPtr,class type,class base);
+
+/**
+ * Macro to create a GenObject class from two base classes and implement @ref GenObject::getObject
+ * Try to obtain something from a data member first
+ * @param dataPtr Pointer to member data variable
+ * @param type Class that is declared
+ * @param base1 First base class that is inherited
+ * @param base2 Second base class that is inherited
+ */
+void YCLASS2_DATA(var dataPtr,class type,class base1,class base2);
+
+/**
+ * Macro to create a GenObject class from three base classes and implement @ref GenObject::getObject
+ * Try to obtain something from a data member first
+ * @param dataPtr Pointer to member data variable
+ * @param type Class that is declared
+ * @param base1 First base class that is inherited
+ * @param base2 Second base class that is inherited
+ * @param base3 Third base class that is inherited
+ */
+void YCLASS3_DATA(var dataPtr,class type,class base1,class base2,class base3);
 
 /**
  * Macro to implement @ref GenObject::getObject in a derived class
@@ -982,6 +1020,32 @@ public: virtual void* getObject(const String& name) const \
   tmp = base2::getObject(name); \
   return tmp ? tmp : base3::getObject(name); }
 
+#define YCLASS_CALL(res) { void* tmp = res; if (tmp) return tmp; }
+#define YCLASS_CALL_LAST(base1,base2) { void* tmp = base1::getObject(name); return tmp ? tmp : base2::getObject(name); }
+#define YCLASS_DATA_CHECK_PTR(dataPtr,type) { \
+    if (dataPtr) YCLASS_CALL((dataPtr)->getObject(name)) \
+    if (name == YATOM(#type)) return const_cast<type*>(this); \
+}
+
+#define YCLASS_DATA(dataPtr,type,base) \
+public: virtual void* getObject(const String& name) const { \
+    YCLASS_DATA_CHECK_PTR(dataPtr,type) \
+    return base::getObject(name); \
+}
+
+#define YCLASS2_DATA(dataPtr,type,base1,base2) \
+public: virtual void* getObject(const String& name) const { \
+    YCLASS_DATA_CHECK_PTR(dataPtr,type) \
+    YCLASS_CALL_LAST(base,base2) \
+}
+
+#define YCLASS3_DATA(dataPtr,type,base1,base2,base3) \
+public: virtual void* getObject(const String& name) const { \
+    YCLASS_DATA_CHECK_PTR(dataPtr,type) \
+    YCLASS_CALL(base1::getObject(name)) \
+    YCLASS_CALL_LAST(base2,base3) \
+}
+
 #define YCLASSIMP(type,base) \
 void* type::getObject(const String& name) const \
 { return (name == YATOM(#type)) ? const_cast<type*>(this) : base::getObject(name); }
@@ -1029,7 +1093,7 @@ YATE_API inline uint32_t hashInt32(uint32_t val)
 
 /**
  * Compute a hash for a pointer
- * @param val Pointer to hash
+ * @param ptr Pointer to hash
  * @return Hash value
  */
 YATE_API inline uint32_t hashPtr(const void* ptr)
@@ -1041,6 +1105,454 @@ YATE_API inline uint32_t hashPtr(const void* ptr)
 #endif
 }
 
+
+#undef YATOMIC_BUILTIN
+#define YATOMIC_LOCK
+#ifdef ATOMIC_OPS
+    #ifndef _WINDOWS
+	#define YATOMIC_BUILTIN
+	#undef YATOMIC_LOCK
+    #endif
+#endif
+#ifdef YATOMIC_LOCK
+    #define YATOMIC_OP_LOCK_WRITE WLock lck(m_lock)
+    #define YATOMIC_OP_LOCK_READ RLock lck(m_lock)
+#else
+    #define YATOMIC_OP_LOCK_WRITE {}
+    #define YATOMIC_OP_LOCK_READ {}
+#endif
+
+/**
+ * Holds an optional lock protecting an atomic operation
+ * @short Base class for atomic operations
+ */
+class YATE_API AtomicOp
+{
+public:
+    /**
+     * Constructor
+     */
+    AtomicOp();
+
+    /**
+     * Retrieve the lock used to protect the atomic operation
+     * @return RWLock pointer, NULL if atomic operation is available
+     */
+    inline RWLock* lock() const
+	{ return m_lock; }
+
+    /**
+     * Check if atomic operations are used efficiently
+     * @return True if efficient, false otherwise (lock is used)
+     */
+    static bool efficient();
+
+protected:
+    /**
+     * Mutex used to protect changes if atomic operation is not available
+     */
+    mutable RWLock* m_lock;
+};
+
+/**
+ * This class holds an atomic number along with operations on it
+ * @short An atomic number
+ */
+template <class Type> class YAtomicNumber : public AtomicOp
+{
+public:
+    /**
+     * Default constructor
+     */
+    inline YAtomicNumber()
+	: m_value(0)
+	{}
+
+    /**
+     * Constructor
+     * @param val Initial value
+     */
+    explicit inline YAtomicNumber(Type val)
+	: m_value(val)
+	{}
+
+    /**
+     * Copy constructor
+     * @param val Initial value
+     */
+    explicit inline YAtomicNumber(const YAtomicNumber& val)
+	: m_value(val.valueAtomic())
+	{}
+
+    /**
+     * Retrieve held number
+     * @return Held number
+     */
+    inline Type value() const
+	{ return m_value; }
+
+    /**
+     * Retrieve held number
+     * @return Held number
+     */
+    inline Type value()
+	{ return m_value; }
+
+    /**
+     * Retrieve held number reference
+     * @return Held number reference
+     */
+    inline Type& valueRef()
+	{ return m_value; }
+
+    /**
+     * Atomically retrieve held number
+     * @return Held number
+     */
+    inline Type valueAtomic() const {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_add_and_fetch(&m_value,0);
+#else
+	    YATOMIC_OP_LOCK_READ;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Atomically retrieve held number
+     * @return Held number
+     */
+    inline Type valueAtomic() {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_add_and_fetch(&m_value,0);
+#else
+	    YATOMIC_OP_LOCK_READ;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Replace (set a new) value
+     * @param val Value to set
+     * @return Old number value
+     */
+    inline Type set(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_val_compare_and_swap(&m_value,valueAtomic(),val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    int old = m_value;
+	    m_value = val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Increment this number
+     * @return Number after increment
+     */
+    inline Type inc() {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_add_and_fetch(&m_value,1);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    return ++m_value;
+#endif
+	}
+
+    /**
+     * Decrement this number
+     * @return Number after decrement
+     */
+    inline Type dec() {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_sub_and_fetch(&m_value,1);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    return --m_value;
+#endif
+	}
+
+    /**
+     * Add a number to this one
+     * @param val Number to add
+     * @return Number after addition
+     */
+    inline Type add(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_add_and_fetch(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    m_value += val;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Substract a number from this one
+     * @param val Number to substract
+     * @return Number after substraction
+     */
+    inline Type sub(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_sub_and_fetch(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    m_value -= val;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Bitwise AND
+     * @param val Value to apply
+     * @return Number after operation
+     */
+    inline Type bitAnd(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_and_and_fetch(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    m_value &= val;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Bitwise OR
+     * @param val Value to apply
+     * @return Number after operation
+     */
+    inline Type bitOr(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_or_and_fetch(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    m_value |= val;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Bitwise XOR
+     * @param val Value to apply
+     * @return Number after operation
+     */
+    inline Type bitXor(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_xor_and_fetch(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    m_value ^= val;
+	    return m_value;
+#endif
+	}
+
+    /**
+     * Increment this number
+     * @return Number before increment
+     */
+    inline Type preInc() {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_add(&m_value,1);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    int old = m_value++;
+	    return old;
+#endif
+	}
+
+    /**
+     * Decrement this number
+     * @return Number before decrement
+     */
+    inline Type preDec() {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_sub(&m_value,1);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    int old = m_value--;
+	    return old;
+#endif
+	}
+
+    /**
+     * Add a number to this one
+     * @param val Number to add
+     * @return Number before addition
+     */
+    inline Type preAdd(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_add(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    int old = m_value;
+	    m_value += val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Substract a number from this one
+     * @param val Number to substract
+     * @return Number before substraction
+     */
+    inline Type preSub(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_sub(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    int old = m_value;
+	    m_value -= val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Bitwise AND
+     * @param val Value to apply
+     * @return Number before operation
+     */
+    inline Type preBitAnd(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_and(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    Type old = m_value;
+	    m_value &= val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Bitwise OR
+     * @param val Value to apply
+     * @return Number before operation
+     */
+    inline Type preBitOr(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_or(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    Type old = m_value;
+	    m_value |= val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Bitwise XOR
+     * @param val Value to apply
+     * @return Number before operation
+     */
+    inline Type preBitXor(Type val) {
+#ifdef YATOMIC_BUILTIN
+	    return __sync_fetch_and_xor(&m_value,val);
+#else
+	    YATOMIC_OP_LOCK_WRITE;
+	    Type old = m_value;
+	    m_value ^= val;
+	    return old;
+#endif
+	}
+
+    /**
+     * Cast operator
+     * Return atomic value
+     */
+    inline operator Type()
+	{ return valueAtomic(); }
+
+    /**
+     * Cast operator
+     * Return atomic value
+     */
+    inline operator Type() const
+	{ return valueAtomic(); }
+
+    /**
+     * Assignment operator
+     * @param val Number to set
+     */
+    inline YAtomicNumber& operator=(Type val)
+	{ set(val); return *this; }
+
+    /**
+     * Assignment operator
+     * @param val Number to set
+     */
+    inline YAtomicNumber& operator=(const YAtomicNumber& val)
+	{ set((Type)val); return *this; }
+
+    /**
+     * Addition operator
+     * @param val Number to add
+     */
+    inline Type operator+=(Type val)
+	{ return add(val); }
+
+    /**
+     * Prefix increment operator
+     */
+    inline Type operator++()
+	{ return inc(); }
+
+    /**
+     * Prefix decrement operator
+     */
+    inline Type operator--()
+	{ return dec(); }
+
+    /**
+     * Postfix increment operator
+     */
+    inline Type operator++(int)
+	{ return preInc(); }
+
+    /**
+     * Postfix decrement operator
+     */
+    inline Type operator--(int)
+	{ return preDec(); }
+
+    /**
+     * Substraction operator
+     * @param val Number to substract
+     */
+    inline Type operator-=(Type val)
+	{ return sub(val); }
+
+    /**
+     * Bitwise AND operator
+     * @param val Number to apply
+     */
+    inline Type operator&=(Type val)
+	{ return bitAnd(val); }
+
+    /**
+     * Bitwise OR operator
+     * @param val Number to apply
+     */
+    inline Type operator|=(Type val)
+	{ return bitOr(val); }
+
+    /**
+     * Bitwise XOR operator
+     * @param val Number to apply
+     */
+    inline Type operator^=(Type val)
+	{ return bitXor(val); }
+
+protected:
+    mutable Type m_value;
+};
+
+typedef YAtomicNumber<int> AtomicInt;
+typedef YAtomicNumber<unsigned int> AtomicUInt;
+typedef YAtomicNumber<int64_t> AtomicInt64;
+typedef YAtomicNumber<uint64_t> AtomicUInt64;
+typedef YAtomicNumber<int32_t> AtomicInt32;
+typedef YAtomicNumber<uint32_t> AtomicUInt32;
 
 /**
  * An object with just a public virtual destructor
@@ -1781,6 +2293,14 @@ public:
     unsigned int assign(ObjList& list, bool move = true, unsigned int maxLen = 0);
 
     /**
+     * Resize the vector. Reset data if not kept
+     * @param len New vector length
+     * @param keepData Keep old data
+     * @return Capacity of the vector
+     */
+    unsigned int resize(unsigned int len, bool keepData = false);
+
+    /**
      * Retrieve and remove an object from the vector
      * @param index Index of the object to retrieve
      * @return Pointer to the stored object, NULL for out of bound index
@@ -2283,7 +2803,6 @@ public:
     inline int lenUtf8(uint32_t maxChar = 0x10ffff, bool overlong = false) const
 	{ return lenUtf8(m_string,maxChar,overlong); }
 
-	
     /**
      * Fix an UTF-8 encoded string by replacing invalid sequences
      * @param replace String to replace invalid sequences, use U+FFFD if null
@@ -2293,7 +2812,7 @@ public:
      */
     int fixUtf8(const char* replace = 0, uint32_t maxChar = 0x10ffff, bool overlong = false);
 
-     /**
+    /**
      * Encode flags from dictionary values
      * @param tokens The dictionary containing the flags
      * @return Encoded flags
@@ -2324,6 +2843,7 @@ public:
      * @return Decoded flags
      */
      const String& decodeFlags(uint64_t flags, const TokenDict64* tokens, bool unknownflag = true);
+
     /**
      * Check if a string starts with UTF-8 Byte Order Mark
      * @param str String to check for BOM
@@ -2558,7 +3078,7 @@ public:
      * @param upCase Set to true to use upper case characters in hexa
      * @return Reference to the String
      */
-    String& hexify(void* data, unsigned int len, char sep = 0, bool upCase = false);
+    String& hexify(const void* data, unsigned int len, char sep = 0, bool upCase = false);
 
     /**
      * Assignment operator.
@@ -2821,11 +3341,38 @@ public:
 	{ return append(&list,separator,force); }
 
     /**
+     * Append buffer filled with character to current string
+     * @param value Character to insert. NUL character will be ignored
+     * @param len Number of characters to append
+     * @return Reference to the String
+     */
+    inline String& append(char value, unsigned int len = 1)
+	{ return insert(length(),value,len); }
+
+    /**
      * Explicit double append
      * @param value Value to append
      * @param decimals Number of decimals
      */
     String& append(double value, unsigned int decimals = 3);
+
+    /**
+     * Insert a string into current string
+     * @param pos Position to insert. String will be appended if position is greater than curent length
+     * @param value String to insert
+     * @param len Length of the data to copy, -1 for full string
+     * @return Reference to the String
+     */
+    String& insert(unsigned int pos, const char* value, int len = -1);
+
+    /**
+     * Insert a character into current string
+     * @param pos Position to insert. Negative or greater than curent length: append
+     * @param value Character to insert. NUL character will be ignored
+     * @param len Number of characters to insert
+     * @return Reference to the String
+     */
+    String& insert(unsigned int pos, char value, unsigned int len = 1);
 
     /**
      * Build a String in a printf style.
@@ -2840,6 +3387,20 @@ public:
      * @param format The output format.
      */
     String& printf(unsigned int length, const char* format,  ...) FORMAT_CHECK(3);
+
+    /**
+     * Append a String in a printf style.
+     * @param format The output format.
+     * NOTE: The length of added string will be at most 128 + length of format
+     */
+    String& printfAppend(const char* format, ...) FORMAT_CHECK(2);
+
+    /**
+     * Append a String in a printf style.
+     * @param length maximum length of the resulting string
+     * @param format The output format.
+     */
+    String& printfAppend(unsigned int length, const char* format,  ...) FORMAT_CHECK(3);
 
     /**
      * Build a fixed aligned string from str and append it.
@@ -3082,13 +3643,48 @@ public:
 	{ return sqlEscape(c_str(),extraEsc); }
 
     /**
+     * Append an escaped string suitable for use in URIs
+     * @param buf Destination buffer
+     * @param str String to convert to escaped format
+     * @param extraEsc Character to escape other than the default ones
+     * @param noEsc Optional pointer to string of characters that shouldn't be escaped
+     * @return Destination buffer reference
+     */
+    static String& uriEscapeTo(String& buf, const char* str, char extraEsc = 0,
+	const char* noEsc = 0);
+
+    /**
+     * Append an escaped string suitable for use in URIs
+     * @param buf Destination buffer
+     * @param str String to convert to escaped format
+     * @param extraEsc Pointer to string of characters to escape other than the defaults
+     * @param noEsc Optional pointer to string of characters that shouldn't be escaped
+     * @return Destination buffer reference
+     */
+    static String& uriEscapeTo(String& buf, const char* str, const char* extraEsc,
+	const char* noEsc = 0);
+
+    /**
+     * Append an escaped string suitable for use in URIs
+     * @param buf Destination buffer
+     * @param extraEsc Character to escape other than the default ones
+     * @param noEsc Optional pointer to string of characters that shouldn't be escaped
+     * @return Destination buffer reference
+     */
+    inline String& uriEscapeTo(String& buf, char extraEsc = 0, const char* noEsc = 0) const
+	{ return uriEscapeTo(buf,c_str(),extraEsc,noEsc); }
+
+    /**
      * Create an escaped string suitable for use in URIs
      * @param str String to convert to escaped format
      * @param extraEsc Character to escape other than the default ones
      * @param noEsc Optional pointer to string of characters that shouldn't be escaped
      * @return The string with special characters escaped
      */
-    static String uriEscape(const char* str, char extraEsc = 0, const char* noEsc = 0);
+    static inline String uriEscape(const char* str, char extraEsc = 0, const char* noEsc = 0) {
+	    String tmp;
+	    return uriEscapeTo(tmp,str,extraEsc,noEsc);
+	}
 
     /**
      * Create an escaped string suitable for use in URIs
@@ -3097,7 +3693,10 @@ public:
      * @param noEsc Optional pointer to string of characters that shouldn't be escaped
      * @return The string with special characters escaped
      */
-    static String uriEscape(const char* str, const char* extraEsc, const char* noEsc = 0);
+    static inline String uriEscape(const char* str, const char* extraEsc, const char* noEsc = 0) {
+	    String tmp;
+	    return uriEscapeTo(tmp,str,extraEsc,noEsc);
+	}
 
     /**
      * Create an escaped string suitable for use in URI
@@ -3109,20 +3708,56 @@ public:
 	{ return uriEscape(c_str(),extraEsc,noEsc); }
 
     /**
+     * Decode and append an URI escaped string back to its raw form
+     * It is safe to call this method with 'str' set to buf.c_str()
+     * @param buf Destination buffer
+     * @param str String to convert to unescaped format
+     * @param setPartial Copy partial (succeeded) string on failure
+     * @param errptr Pointer to an integer to receive the place of 1st error
+     * @return Destination buffer reference
+     */
+    static String& uriUnescapeTo(String& buf, const char* str, bool setPartial = false,
+	int* errptr = 0);
+
+    /**
+     * Decode an URI escaped string back to its raw form
+     * @param buf Destination buffer
+     * @param setPartial Copy partial (succeeded) string on failure
+     * @param errptr Pointer to an integer to receive the place of 1st error
+     * @return Destination buffer reference
+     */
+    inline String& uriUnescapeTo(String& buf, bool setPartial = false, int* errptr = 0) const
+	{ return uriUnescapeTo(buf,c_str(),setPartial,errptr); }
+
+    /**
+     * In place decode an URI escaped string back to its raw form
+     * @param setPartial Copy partial (succeeded) string on failure
+     * @param errptr Pointer to an integer to receive the place of 1st error
+     * @return String reference
+     */
+    inline String& uriUnescapeStr(bool setPartial = false, int* errptr = 0)
+	{ return uriUnescapeTo(*this,c_str(),setPartial,errptr); }
+
+    /**
      * Decode an URI escaped string back to its raw form
      * @param str String to convert to unescaped format
      * @param errptr Pointer to an integer to receive the place of 1st error
+     * @param setPartial Copy partial (succeeded) string on failure
      * @return The string with special characters unescaped
      */
-    static String uriUnescape(const char* str, int* errptr = 0);
+    static inline String uriUnescape(const char* str, int* errptr = 0, bool setPartial = true) {
+	    String tmp;
+	    return uriUnescapeTo(tmp,str,setPartial,errptr);
+	}
 
     /**
      * Decode an URI escaped string back to its raw form
      * @param errptr Pointer to an integer to receive the place of 1st error
+     * @param setPartial Copy partial (succeeded) string on failure
      * @return The string with special characters unescaped
      */
-    inline String uriUnescape(int* errptr = 0) const
-	{ return uriUnescape(c_str(),errptr); }
+    inline String uriUnescape(int* errptr = 0, bool setPartial = true) const
+	{ return uriUnescape(c_str(),errptr,setPartial); }
 
     /**
      * Atom string support helper
@@ -3132,6 +3767,57 @@ public:
      */
     static const String* atom(const String*& str, const char* val);
 
+    /**
+     * Checks if a string starts with a substring
+     * @param str String to search in
+     * @param what Substring to check
+     * @param lenStr String length, negative to detect
+     * @param lenWhat Substring length, negative to detect
+     * @param caseInsensitive Compare case-insensitive if set
+     * @return The length of substring if string starts with it
+     */
+    static unsigned int c_starts_with(const char* str, const char* what, int lenStr = -1,
+	int lenWhat = -1, bool caseInsensitive = false);
+
+    /**
+     * Checks if a string ends with a substring
+     * @param str String to search in
+     * @param what Substring to check
+     * @param lenStr String length, negative to detect
+     * @param lenWhat Substring length, negative to detect
+     * @param caseInsensitive Compare case-insensitive if set
+     * @return The length of substring if string ends with it
+     */
+    static unsigned int c_ends_with(const char* str, const char* what, int lenStr = -1,
+	int lenWhat = -1, bool caseInsensitive = false);
+
+    /**
+     * Skip substring in string if matches
+     * @param str String to search in. Will be advanced by skipped chars
+     * @param what Substring to match
+     * @param lenStr String length, negative to detect
+     * @param lenWhat Substring length, negative to detect
+     * @param caseInsensitive Compare case-insensitive if set
+     * @return The number of skipped chars (length of substring), 0 if not matched
+     */
+    static inline unsigned int c_skip(const char*& str, const char* what, int lenStr = -1,
+	int lenWhat = -1, bool caseInsensitive = false) {
+	    unsigned int n = c_starts_with(str,what,lenStr,lenWhat,caseInsensitive);
+	    str += n;
+	    return n;
+	}
+
+    /**
+     * Skip chars in string
+     * @param str String to skip in. Will be advanced by skipped chars
+     * @param what Characters to match
+     * @param len Optional maximum length to search in string, negative to use the whole string
+     * @param skipFound Set it to false to skip while NOT match (until first match character)
+     * @return Number of skipped chars
+     */
+    static unsigned int c_skip_chars(const char*& str, const char* what,
+	int len = -1, bool skipFound = true);
+
 protected:
     /**
      * Called whenever the value changed (except in constructors).
@@ -3139,12 +3825,541 @@ protected:
      virtual void changed();
 
 private:
+    String& changeStringData(char* data, unsigned int len);
     void clearMatches();
     char* m_string;
     unsigned int m_length;
     // I hope every C++ compiler now knows about mutable...
     mutable unsigned int m_hash;
     StringMatchPrivate* m_matches;
+};
+
+/**
+ * This class holds an automatic (owned) GenObject pointer
+ * Ownership may be reset to avoid releasing the held pointer when destroyed
+ * @short GenObject pointer holder
+ */
+class YATE_API AutoGenObject : public String
+{
+    YCLASS_DATA(m_pointer,AutoGenObject,String)
+    YNOCOPY(AutoGenObject); // no automatic copies please
+public:
+    /**
+     * Constructor
+     * @param gen Optional pointer to object
+     * @param name Optional name
+     * @param owned True if held object is owned
+     */
+    inline AutoGenObject(GenObject* gen = 0, const char* name = 0, bool owned = true)
+	: String(name), m_pointer(gen), m_owned(owned)
+	{}
+
+    /**
+     * Destructor
+     */
+    inline ~AutoGenObject()
+	{ set(); }
+
+    /**
+     * Retrieve the held data
+     * @return The stored pointer
+     */
+    inline GenObject* data() const
+	{ return m_pointer; }
+
+    /**
+     * Take the pointer. Caller retains ownership
+     * @return GenObject pointer, NULL if not set
+     */
+    inline GenObject* take() {
+	    GenObject* gen = m_pointer;
+	    m_pointer = 0;
+	    return gen;
+	}
+
+    /**
+     * Replace data
+     * @param gen Optional pointer to object
+     * @param owned True if held object is owned
+     */
+    inline void set(GenObject* gen = 0, bool owned = true) {
+	    if (m_pointer == gen)
+		return;
+	    GenObject* tmp = m_pointer;
+	    m_pointer = gen;
+	    if (m_owned)
+		TelEngine::destruct(tmp);
+	    m_owned = owned;
+	}
+
+    /**
+     * Assignment from pointer
+     * @param gen New pointer value
+     */
+    inline AutoGenObject& operator=(GenObject* gen)
+	{ set(gen); return *this; }
+
+    /**
+     * Conversion to regular pointer operator
+     * @return The stored pointer
+     */
+    inline operator GenObject*() const
+	{ return m_pointer; }
+
+    /**
+     * Member access operator
+     */
+    inline GenObject* operator->() const
+	{ return m_pointer; }
+
+    /**
+     * Dereferencing operator
+     */
+    inline GenObject& operator*() const
+	{ return *m_pointer; }
+
+private:
+    GenObject* m_pointer;
+    bool m_owned;
+};
+
+/**
+ * Template for generic object vector
+ * The vector can be resized (up/down)
+ * Objects MUST implement a default contructor and an assignment operator
+ * When name based find or set are used objects should implement toString()
+ * This template should be used for simple objects
+ * @short Template for generic object vector
+ */
+template <class Obj> class GenericVector : public GenObject
+{
+public:
+    /**
+     * Constructor
+     * @param overAlloc How many items to overallocate
+     * @param name Optional vector name
+     */
+    inline GenericVector(unsigned int overAlloc = 0, const char* name = 0)
+	: m_data(0), m_length(0), m_size(0), m_overAlloc(overAlloc), m_name(name)
+	{}
+
+    /**
+     * Constructor
+     * @param items Pointer to initial values
+     * @param count Initial length
+     * @param overAlloc How many items to overallocate
+     * @param name Optional vector name
+     */
+    inline GenericVector(const Obj* items, unsigned int count, unsigned int overAlloc = 0,
+	const char* name = 0)
+	: m_data(0), m_length(0), m_size(0), m_overAlloc(overAlloc), m_name(name)
+	{ assign(count,items); }
+
+    /**
+     * Constructor
+     * @param items List to copy
+     * @param overAlloc How items to overallocate
+     * @param name Optional vector name
+     */
+    inline GenericVector(const ObjList& items, unsigned int overAlloc = 0,
+	const char* name = 0)
+	: m_data(0), m_length(0), m_size(0), m_overAlloc(overAlloc), m_name(name)
+	{ assign(items); }
+
+    /**
+     * Copy constructor
+     * @param other Vector to copy
+     */
+    inline GenericVector(const GenericVector& other)
+	: m_data(0), m_length(0), m_size(0), m_overAlloc(other.overAlloc()),
+	m_name(other.name())
+	{ assign(other.length(),other.data()); }
+
+    /**
+     * Destructor
+     */
+    virtual ~GenericVector()
+	{ clear(); }
+
+    /**
+     * Retrieve vector length
+     * @return Vector length
+     */
+    inline unsigned int length() const
+	{ return m_length; }
+
+    /**
+     * Retrieve vector size (total allocated items, including over alloc)
+     * @return Vector size
+     */
+    inline unsigned int size() const
+	{ return m_size; }
+
+    /**
+     * Retrieve the over alloc value
+     * @return Over alloc value
+     */
+    inline unsigned int overAlloc() const
+	{ return m_overAlloc; }
+
+    /**
+     * Set over alloc length
+     * @param count Value of over alloc length
+     */
+    inline void overAlloc(unsigned int count)
+	{ m_overAlloc = count; }
+
+    /**
+     * Retrieve vector name
+     * @return Vector name
+     */
+    inline const String& name() const
+	{ return m_name; }
+
+    /**
+     * Retrieve a pointer to data
+     * @param offs Index to start
+     * @param count Optional number of elements to retrieve
+     * @return Obj pointer, NULL if data not set or given index and count are past vector length
+     */
+    inline Obj* data(unsigned int offs = 0, unsigned int count = 0)
+	{ return dataAvail(offs,count); }
+
+    /**
+     * Retrieve a pointer to data
+     * @param offs Index to start
+     * @param count Optional number of elements to retrieve
+     * @return Obj pointer, NULL if data not set or given index and count are past vector length
+     */
+    inline const Obj* data(unsigned int offs = 0, unsigned int count = 0) const
+	{ return dataAvail(offs,count); }
+
+    /**
+     * Retrieve a pointer to first item in vector
+     * @return Obj pointer, NULL if not found
+     */
+    inline Obj* first()
+	{ return m_data; }
+
+    /**
+     * Retrieve a pointer to first item in vector
+     * @return Obj pointer, NULL if not found
+     */
+    inline const Obj* first() const
+	{ return m_data; }
+
+    /**
+     * Retrieve a pointer to last item in vector
+     * @return Obj pointer, NULL if not found
+     */
+    inline Obj* last()
+	{ return length() ? m_data + length() - 1 : 0; }
+
+    /**
+     * Retrieve a pointer to last item in vector
+     * @return Obj pointer, NULL if not found
+     */
+    inline const Obj* last() const
+	{ return length() ? m_data + length() - 1 : 0; }
+
+    /**
+     * Retrieve index of object by name
+     * Obj MUST implement toString()
+     * @param name Object name
+     * @param offs Optional index to start
+     * @param found Optional pointer to be filled with found object pointer
+     * @return Index of object, -1 if not found
+     */
+    inline int indexOf(const String& name, unsigned int offs = 0, Obj** found = 0) const {
+	    const Obj* d = data(offs);
+	    for (; offs < length(); ++offs, ++d)
+		if (name == d->toString()) {
+		    if (found)
+			*found = (Obj*)d;
+		    return offs;
+		}
+	    return -1;
+	}
+
+    /**
+     * Find an object by name
+     * Obj MUST implement toString()
+     * @param name Object name
+     * @param offs Optional index to start
+     * @return Obj pointer, NULL if not found
+     */
+    inline Obj* find(const String& name, unsigned int offs = 0) const {
+	    Obj* d = 0;
+	    indexOf(name,offs,&d);
+	    return d;
+	}
+
+    /**
+     * Clear data
+     */
+    inline void clear() {
+	    if (!m_data)
+		return;
+	    delete[] m_data;
+	    m_data = 0;
+	    m_length = m_size = 0;
+	}
+
+    /**
+     * Assign new data or just allocate new space
+     * @param len New vector length. No changes will be applied if 0
+     * @param items Pointer to items to set. Pointer may be inside held buffer
+     * @param count Number of items to copy, 0 to use 'len', At most 'len' items will be copied
+     * @return True on success, false on memory allocation failure
+     */
+    inline bool assign(unsigned int len, const Obj* items = 0, unsigned int count = 0) {
+	    if (!len)
+		return true;
+	    unsigned int sz = len + m_overAlloc;
+	    Obj* tmp = new Obj[sz];
+	    if (!tmp) {
+		Debug("YateVector",DebugFail,"Failed to allocate %u item(s) bytes=%u",
+		    sz,(unsigned int)(sz * sizeof(Obj)));
+		return false;
+	    }
+	    if (items)
+		copy(tmp,items,!count ? len : (count <= len ? count : len));
+	    if (m_data)
+		delete[] m_data;
+	    m_data = tmp;
+	    m_length = len;
+	    m_size = sz;
+	    return true;
+	}
+
+    /**
+     * Resize the vector
+     * 'len' between length() and size(): just increase length
+     * 'len' between (size() - overAlloc()) and size(): just decrease length,
+     *   assign empty Obj to remaining items
+     * @param len New vector length. No changes will be applied if len is 0 
+     *  or equal to current vector length
+     * @return True on success, false on memory allocation failure
+     */
+    inline bool resize(unsigned int len) {
+	    if (!len || len == length())
+		return true;
+	    if (len > size())
+		return assign(len,m_data,length());
+	    if (length() > len) {
+		if ((size() - len) > m_overAlloc)
+		    return assign(len,m_data,length());
+		fill(len,length() - len);
+	    }
+	    m_length = len;
+	    return true;
+	}
+
+    /**
+     * Remove last item(s)
+     * @param count Number of items to remove
+     * @return True on success, false on memory allocation failure
+     */
+    inline bool removeLast(unsigned int count = 1) {
+	    if (!count)
+		return true;
+	    if (count < length())
+		return resize(length() - count);
+	    clear();
+	    return true;
+	}
+
+    /**
+     * Fill vector with data
+     * @param offs Start offset
+     * @param count Number of items to fill, negative to fill until vector end
+     * @param value Optional value to fill. Fill with default Obj if not given
+     * @return Number of filled items. 0 on empty count or failure
+     */
+    inline unsigned int fill(unsigned int offs = 0, int count = -1, const Obj* value = 0) {
+	    if (!count)
+		return 0;
+	    unsigned int n = numItems(offs,count < 0 ? length() : (unsigned int)count);
+	    if (!n)
+		return 0;
+	    if (value)
+		fillArray(*value,m_data + offs,n);
+	    else {
+		Obj item;
+		fillArray(item,m_data + offs,n);
+	    }
+	    return n;
+	}
+
+    /**
+     * Fill vector with data
+     * @param value Value to fill
+     * @param offs Start offset
+     * @param count Number of items to fill, negative to fill until vector end
+     * @return Number of filled items. 0 on empty count or failure
+     */
+    inline unsigned int fill(const Obj& value, unsigned int offs = 0, int count = -1)
+	{ return fill(offs,count,&value); }
+
+    /**
+     * Fill vector with data
+     * @param items Items to fill
+     * @param count Number of items to fill
+     * @param offs Optional start offset
+     * @return Number of filled items, 0 on empty items or failure
+     */
+    inline unsigned int fill(const Obj* items, unsigned int count, unsigned int offs = 0) {
+	    if (!(items && count))
+		return 0;
+	    unsigned int n = numItems(offs,count);
+	    if (n)
+		copy(m_data + offs,items,n);
+	    return n;
+	}
+
+    /**
+     * Append an item to vector
+     * @param item Item to append
+     * @return Given item pointer, NULL on failure
+     */
+    inline Obj* append(const Obj& item) {
+	    if (!resize(length() + 1))
+		return 0;
+	    m_data[length() - 1] = item;
+	    return (Obj*)&item;
+	}
+
+    /**
+     * Append an array of items to vector
+     * @param items Pointer to items to append
+     * @param count The number of items to append
+     * @return Number of added items
+     */
+    inline unsigned int append(const Obj* items, unsigned int count) {
+	    if (!(items && count && resize(length() + count)))
+		return 0;
+	    copy(m_data + length() - count,items,count);
+	    return count;
+	}
+
+    /**
+     * Append a list of items
+     * @param list Items to append
+     * @return Number of added items
+     */
+    inline unsigned int append(const ObjList& list) {
+	    unsigned int n = list.count();
+	    if (!(n && resize(length() + n)))
+		return 0;
+	    copy(m_data + length() - n,list);
+	    return n;
+	}
+
+    /**
+     * Append a list of items
+     * @param list Items to append
+     * @return Number of added items, 0 on empty list or failure
+     */
+    inline unsigned int assign(const ObjList& list) {
+	    unsigned int n = list.count();
+	    if (!(n && resize(n)))
+		return 0;
+	    copy(m_data,list);
+	    return n;
+	}
+
+    /**
+     * Append or set an item to vector
+     * @param item Item to append or set
+     * @return Given item pointer, NULL on failure
+     */
+    inline Obj* set(const Obj& item) {
+	    int idx = indexOf(item);
+	    if (idx < 0)
+		return append(item);
+	    m_data[idx] = item;
+	    return (Obj*)&item;
+	}
+
+    /**
+     * Assignment (from other vector) operator
+     * @param other Vector to assign
+     */
+    inline GenericVector& operator=(const GenericVector& other) {
+	    assign(other.length(),other.data());
+	    return *this;
+	}
+
+    /**
+     * Assignment (from Obj vector) operator
+     * @param item Item to assign
+     */
+    inline GenericVector& operator=(const Obj& item) {
+	    assign(1,&item);
+	    return *this;
+	}
+
+    /**
+     * Addition (append) operator
+     * @param item Item to append
+     */
+    inline GenericVector& operator+=(const Obj& item) {
+	    append(item);
+	    return *this;
+	}
+
+    /**
+     * Addition (append) operator
+     * @param other Vector to append
+     */
+    inline GenericVector& operator+=(const GenericVector& other) {
+	    if (&other != this)
+		append(other.data(),other.length());
+	    else {
+		unsigned int n = length();
+		resize(2 * n);
+		fill(data(),n,n);
+	    }
+	    return *this;
+	}
+
+    /**
+     * Retrieve vector name
+     * @return Vector name
+     */
+    virtual const String& toString() const
+	{ return name(); }
+
+protected:
+    // Retrive data available from offset
+    inline Obj* dataAvail(unsigned int offs, unsigned int count) const {
+	    if (offs >= length() || !m_data)
+		return 0;
+	    return (count <= (length() - offs)) ? (m_data + offs) : 0;
+	}
+    // Calculate the number of items available from offset
+    inline unsigned int numItems(unsigned int offs, unsigned int count) const {
+	    if (offs >= length())
+		return 0;
+	    offs = length() - offs;
+	    return (count <= offs) ? count : offs;
+	}
+    static inline void fillArray(const Obj& value, Obj* dest, unsigned int n)
+	{ while (n) { *dest++ = value; --n; } }
+    static inline void copy(Obj* dest, const ObjList& src) {
+	    for (const ObjList* o = src.skipNull(); o; o = o->skipNext())
+		*dest++ = *static_cast<Obj*>(o->get());
+	}
+    static inline void copy(Obj* dest, const Obj* src, unsigned int n)
+	{ while (n) { *dest++ = *src++; --n; } }
+
+    Obj* m_data;
+    unsigned int m_length;
+    unsigned int m_size;
+    unsigned int m_overAlloc;
+
+private:
+    String m_name;
 };
 
 /**
@@ -3606,7 +4821,9 @@ public:
      * Constructor
      * @param name Name of the counter
      */
-    explicit NamedCounter(const String& name);
+    explicit NamedCounter(const String& name)
+	: String(name), m_enabled(GenObject::getObjCounting())
+	{}
 
     /**
      * Check if the counter is enabled
@@ -3626,13 +4843,23 @@ public:
      * Increment the counter
      * @return Post-increment value of the counter
      */
-    int inc();
+    inline int inc()
+	{ return m_count.inc(); }
 
     /**
      * Decrement the counter
      * @return Post-decrement value of the counter
      */
-    int dec();
+    inline int dec()
+	{ return m_count.dec(); }
+
+    /**
+     * Add a specific value to the counter
+     * @param val Value to add
+     * @return Value after addition
+     */
+    inline int add(int val)
+	{ return m_count.add(val); }
 
     /**
      * Get the current value of the counter
@@ -3642,9 +4869,8 @@ public:
 	{ return m_count; }
 
 private:
-    int m_count;
+    AtomicInt m_count;
     bool m_enabled;
-    Mutex* m_mutex;
 };
 
 /**
@@ -4236,7 +5462,6 @@ private:
 class YATE_API DataBlock : public GenObject
 {
 public:
-
     /**
      * Constructs an empty data block
      * @param overAlloc How many bytes of memory to overallocate
@@ -4351,33 +5576,142 @@ public:
     DataBlock& assign(void* value, unsigned int len, bool copyData = true, unsigned int allocated = 0);
 
     /**
+     * Change the current block. Insert or append data and/or fill with value
+     * @param pos Buffer position, append at end if past buffer end
+     * @param buf Data to copy
+     * @param bufLen Data length, ignored if 'buf' is NULL
+     * @param extra Number of extra filled bytes to handle after given buffer
+     * @param extraVal Value to fill
+     * @param mayOverlap Set it to false if a buffer is given and you are sure it's not inside current block
+     * @return True on success, false on failure (memory allocation error)
+     */
+    bool change(unsigned int pos, const void* buf, unsigned int bufLen,
+	unsigned int extra = 0, int extraVal = 0, bool mayOverlap = true);
+
+    /**
+     * Change (append or insert unsigned integer data) to the current block
+     * @param pos Buffer position, append at end if past buffer end
+     * @param value Value to append
+     * @param len Number of bytes to handle
+     * @param lsb Byte direction. Less/most significant byte
+     * @return True on success, false on failure (memory allocation error)
+     */
+    bool change8(unsigned int pos, uint64_t value, unsigned int len = 8, bool lsb = true);
+
+    /**
+     * Change (append or insert unsigned integer data) to the current block
+     * @param pos Buffer position, append at end if past buffer end
+     * @param value Value to append
+     * @param len Number of bytes to handle
+     * @param lsb Byte direction. Less/most significant byte
+     * @return True on success, false on failure (memory allocation error)
+     */
+    bool change4(unsigned int pos, uint32_t value, unsigned int len = 4, bool lsb = true);
+
+    /**
      * Append data to the current block
      * @param value Data to append
      * @param len Length of data
+     * @param mayOverlap Set it to false if you are sure the buffer it's not inside current block
      */
-    inline void append(void* value, unsigned int len) {
-	    DataBlock tmp(value,len,false);
-	    append(tmp);
-	    tmp.clear(false);
+    inline void append(const void* value, unsigned int len, bool mayOverlap = true) {
+	    if (value && len)
+		change(length(),value,len,0,0,mayOverlap);
 	}
 
     /**
      * Append data to the current block
      * @param value Data to append
+     * @param mayOverlap Set it to false if you are sure the buffer it's not inside current block
      */
-    void append(const DataBlock& value);
+    inline void append(const DataBlock& value, bool mayOverlap = true) {
+	    if (value.length())
+		change(length(),value.data(),value.length(),0,0,mayOverlap);
+	}
 
     /**
      * Append a String to the current block
      * @param value String to append
      */
-    void append(const String& value);
+    inline void append(const String& value) {
+	    if (value.length())
+		change(length(),value.c_str(),value.length(),0,0,false);
+	}
+
+    /**
+     * Append unsigned integer data to the current block
+     * @param value Value to append
+     * @param len Number of bytes to handle
+     * @param lsb Byte direction. Less/most significant byte
+     */
+    inline void append8(uint64_t value, unsigned int len = 8, bool lsb = true)
+	{ change8(length(),value,len,lsb); }
+
+    /**
+     * Append unsigned integer data to the current block
+     * @param value Value to append
+     * @param len Number of bytes to handle
+     * @param lsb Byte direction. Less/most significant byte
+     */
+    inline void append4(uint32_t value, unsigned int len = 4, bool lsb = true)
+	{ change4(length(),value,len,lsb); }
+
+    /**
+     * Append 1 byte to the current block
+     * @param value Value to append
+     */
+    inline void append1(uint8_t value)
+	{ append((const void*)&value,1,true); }
+
+    /**
+     * Insert data in the current block
+     * @param buf Data to copy
+     * @param bufLen Data length
+     * @param pos Buffer position
+     * @param mayOverlap Set it to false if you are sure the buffer it's not inside current block
+     */
+    inline void insert(const void* buf, unsigned int bufLen, unsigned int pos = 0,
+	bool mayOverlap = true)
+	{ change(pos,buf,bufLen,0,0,mayOverlap); }
 
     /**
      * Insert data before the current block
      * @param value Data to insert
+     * @param pos Buffer position
+     * @param mayOverlap Set it to false if you are sure the buffer it's not inside current block
      */
-    void insert(const DataBlock& value);
+    inline void insert(const DataBlock& value, unsigned int pos = 0, bool mayOverlap = true)
+	{ insert(value.data(),value.length(),pos,mayOverlap); }
+
+    /**
+     * Insert unsigned integer data in the current block
+     * @param value Value to insert
+     * @param len Number of bytes to handle
+     * @param pos Buffer position, append at end if greater than current length
+     * @param lsb Byte direction. Less/most significant byte
+     */
+    inline void insert8(uint64_t value, unsigned int len = 8, unsigned int pos = 0,
+	bool lsb = true)
+	{ change8(pos,value,len,lsb); }
+
+    /**
+     * Insert unsigned integer data in the current block
+     * @param value Value to insert
+     * @param len Number of bytes to handle
+     * @param pos Buffer position, append at end if greater than current length
+     * @param lsb Byte direction. Less/most significant byte
+     */
+    inline void insert4(uint32_t value, unsigned int len = 4, unsigned int pos = 0,
+	bool lsb = true)
+	{ change4(pos,value,len,lsb); }
+
+    /**
+     * Insert 1 byte in the current block
+     * @param value Value to insert
+     * @param pos Buffer position, append at end if greater than current length
+     */
+    inline void insert1(uint8_t value, unsigned int pos = 0)
+	{ insert((const void*)&value,1,pos,true); }
 
     /**
      * Resize (re-alloc or free) this block if required size is not the same as the current one
@@ -4445,6 +5779,59 @@ public:
 	const String& dFormat, unsigned maxlen = 0);
 
     /**
+     * Change data data in current block from a hexadecimal string representation. Append or insert.
+     * Each octet must be represented in the input string with 2 hexadecimal characters.
+     * If a separator is specified, the octets in input string must be separated using
+     *  exactly 1 separator. Only 1 leading or 1 trailing separators are allowed.
+     * @param pos Position to insert, append if past buffer end
+     * @param data Input character string
+     * @param len Length of the input string
+     * @param sep Separator character used between octets. 0 if no separator is expected or
+     *  should be guessed
+     * @param guessSep Guess separator value. Ignored if 'sep' is non 0
+     * @param emptyOk Return success on empty hex buffer, false otherwise
+     * @param res Optional pointer to be filled with result. Negative on failure, number of used bytes otherwise
+     * @return True on success, false on failure (invalid hex string, empty hex buffer or memory allocation error)
+     */
+    bool changeHex(unsigned int pos, const char* data, unsigned int len, char sep = 0,
+	bool guessSep = true, bool emptyOk = true, int* res = 0);
+
+    /**
+     * Change data data in current block from a hexadecimal string representation. Append or insert.
+     * Each octet must be represented in the input string with 2 hexadecimal characters.
+     * If a separator is specified, the octets in input string must be separated using
+     *  exactly 1 separator. Only 1 leading or 1 trailing separators are allowed.
+     * @param pos Position to insert, append if past buffer end
+     * @param data Input character string
+     * @param sep Separator character used between octets. 0 if no separator is expected or
+     *  should be guessed
+     * @param guessSep Guess separator value. Ignored if 'sep' is non 0
+     * @param emptyOk Return success on empty hex buffer, false otherwise
+     * @param res Optional pointer to be filled with result. Negative on failure, number of used bytes otherwise
+     * @return True on success, false on failure (invalid hex string, empty hex buffer or memory allocation error)
+     */
+    inline bool changeHex(unsigned int pos, const String& data, char sep = 0, bool guessSep = true,
+	bool emptyOk = true, int* res = 0)
+	{ return changeHex(pos,data.c_str(),data.length(),sep,guessSep,emptyOk,res); }
+
+    /**
+     * Append data in current block from a hexadecimal string representation.
+     * Each octet must be represented in the input string with 2 hexadecimal characters.
+     * If a separator is specified, the octets in input string must be separated using
+     *  exactly 1 separator. Only 1 leading or 1 trailing separators are allowed.
+     * @param data Input character string
+     * @param sep Separator character used between octets. 0 if no separator is expected or
+     *  should be guessed
+     * @param guessSep Guess separator value. Ignored if 'sep' is non 0
+     * @param emptyOk Return success on empty hex buffer, false otherwise
+     * @param res Optional pointer to be filled with result. Negative on failure, number of used bytes otherwise
+     * @return True on success, false on failure (invalid hex string, empty hex buffer or memory allocation error)
+     */
+    inline bool appendHex(const String& data, char sep = 0, bool guessSep = true,
+	bool emptyOk = true, int* res = 0)
+	{ return changeHex(length(),data,sep,guessSep,emptyOk,res); }
+
+    /**
      * Build this data block from a hexadecimal string representation.
      * Each octet must be represented in the input string with 2 hexadecimal characters.
      * If a separator is specified, the octets in input string must be separated using
@@ -4454,7 +5841,10 @@ public:
      * @param sep Separator character used between octets. 0 if no separator is expected
      * @return True if the input string was succesfully parsed, false otherwise
      */
-    bool unHexify(const char* data, unsigned int len, char sep);
+    inline bool unHexify(const char* data, unsigned int len, char sep) {
+	    clear();
+	    return changeHex(length(),data,len,sep,false);
+	}
 
     /**
      * Build this data block from a hexadecimal string representation.
@@ -4465,7 +5855,10 @@ public:
      * @param len Length of the input string
      * @return True if the input string was succesfully parsed, false otherwise
      */
-    bool unHexify(const char* data, unsigned int len);
+    inline bool unHexify(const char* data, unsigned int len) {
+	    clear();
+	    return changeHex(length(),data,len);
+	}
 
     /**
      * Build this data block from a hexadecimal string representation.
@@ -4477,16 +5870,71 @@ public:
 	{ return unHexify(data.c_str(),data.length()); }
 
     /**
+     * Add block values as escaped string suitable for use in SQL queries.
+     * Escape binary zeros and other special characters
+     * @param str Destination string
+     * @param extraEsc Character to escape other than the default ones
+     * @return Destination string reference
+     */
+    inline String& sqlEscape(String& str, char extraEsc = 0) const
+	{ return sqlEscape(str,data(),length(),extraEsc); }
+
+    /**
      * Create an escaped string suitable for use in SQL queries
      * @param extraEsc Character to escape other than the default ones
      * @return A string with binary zeros and other special characters escaped
      */
-    String sqlEscape(char extraEsc) const;
+    inline String sqlEscape(char extraEsc) const {
+	    String tmp;
+	    return sqlEscape(tmp,extraEsc);
+	}
+
+    /**
+     * Add block values as escaped string suitable for use in SQL queries.
+     * Escape binary zeros and other special characters
+     * @param str Destination string
+     * @param data Binary data buffer
+     * @param len Buffer length
+     * @param extraEsc Character to escape other than the default ones
+     * @return Destination string reference
+     */
+    static String& sqlEscape(String& str, const void* data, unsigned int len, char extraEsc = 0);
+
+    /**
+     * Safely move data in the same buffer
+     * It is assumed the buffer is large enough to hold data
+     * pos<=len or pos+space=0: no change
+     * otherwise: move len-pos bytes from buf+pos to buf+pos+space
+     * @param buf The buffer
+     * @param len Buffer length
+     * @param pos Buffer position to move data from
+     * @param space Optional number of bytes to make space at given position
+     */
+    static void moveData(void* buf, unsigned int len, unsigned int pos, unsigned int space = 0);
+
+    /**
+     * Copy buffers. It is assumed the destination and source don't overlap
+     * It is also assumed the destination buffer is large enough to hold data
+     * pos=0: copy len bytes from src to dest+space
+     *  (assume destination buffer is a copy of source buffer with other data inserted at start)
+     * pos=len: copy len bytes from src to dest
+     *  (assume destination buffer is a copy of source buffer with other data added)
+     * otherwise: copy pos bytes from src to dest, copy len-pos bytes from src+pos to dest+pos+space
+     *  (assume destination buffer is a copy of source buffer with other data inserted in the middle)
+     * The following combinations leads to plain data copy: (pos=0 AND space=0), (pos=len), (len>pos AND space=0)
+     * @param dest Destination buffer
+     * @param src Source buffer
+     * @param len Number of bytes to copy (source length)
+     * @param pos Source/destination buffer buffer position
+     * @param space Optional number of bytes to make space at given position
+     */
+    static void copyData(void* dest, const void* src, unsigned int len, unsigned int pos = 0,
+	unsigned int space = 0);
 
 private:
     unsigned int allocLen(unsigned int len) const;
     void* m_data;
-    bool m_dataAlloc;
+    bool m_dataAlloc;  // is the buffer in assign was allocated here beforehand
     unsigned int m_length;
     unsigned int m_allocated;
     unsigned int m_overAlloc;
@@ -5088,16 +6536,126 @@ public:
     NamedList& addParam(const char* name, const char* value, bool emptyOK = true);
 
     /**
+     * Append a named string in the parameter list from signed integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, int64_t value) {
+	    NamedString* ns = new NamedString(name);
+	    *static_cast<String*>(ns) = value;
+	    return addParam(ns);
+	}
+
+    /**
+     * Append a named string in the parameter list from unsigned integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, uint64_t value) {
+	    NamedString* ns = new NamedString(name);
+	    *static_cast<String*>(ns) = value;
+	    return addParam(ns);
+	}
+
+    /**
+     * Append a named string in the parameter list from signed integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, int32_t value) {
+	    NamedString* ns = new NamedString(name);
+	    *static_cast<String*>(ns) = value;
+	    return addParam(ns);
+	}
+
+    /**
+     * Append a named string in the parameter list from unsigned integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, uint32_t value) {
+	    NamedString* ns = new NamedString(name);
+	    *static_cast<String*>(ns) = value;
+	    return addParam(ns);
+	}
+
+    /**
+     * Append a named string in the parameter list from floating point value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, double value) {
+	    NamedString* ns = new NamedString(name);
+	    *static_cast<String*>(ns) = value;
+	    return addParam(ns);
+	}
+
+    /**
+     * Add a named string in the parameter list from boolean value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, bool value)
+	{ return addParam(name,String::boolText(value)); }
+
+    /**
+     * Add a named string in the parameter list from encoded flags
+     * @param name Name of the string
+     * @param flags The flags
+     * @param tokens The dictionary containing the flags
+     * @param unknownflag True (default) to add unknown flags
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, unsigned int flags, const TokenDict* tokens,
+	bool unknownflag = true) {
+	    NamedString* ns = new NamedString(name);
+	    ns->decodeFlags(flags,tokens,unknownflag);
+	    return addParam(ns);
+	}
+
+    /**
+     * Add a named string in the parameter list from encoded flags
+     * @param name Name of the string
+     * @param flags The flags
+     * @param tokens The dictionary containing the flags
+     * @param unknownflag True (default) to add unknown flags
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParam(const char* name, uint64_t flags, const TokenDict64* tokens,
+	bool unknownflag = true) {
+	    NamedString* ns = new NamedString(name);
+	    ns->decodeFlags(flags,tokens,unknownflag);
+	    return addParam(ns);
+	}
+
+    /**
+     * Hexify a buffer and add it to parameters list
+     * @param name Parameter name
+     * @param buf Buffer to add
+     * @param len Buffer length
+     * @param sep Optiona separamtor (defaults to space)
+     * @return Reference to this NamedList
+     */
+    inline NamedList& addParamHex(const char* name, const void* buf,
+	unsigned int len, char sep = 0) {
+	    NamedString* ns = new NamedString(name);
+	    if (buf && len)
+		ns->hexify((void*)buf,len,sep);
+	    return addParam(ns);
+	}
+
+    /**
      * Set a named string in the parameter list.
      * @param param Parameter to set or add
      * @return Reference to this NamedList
      */
-    inline NamedList& setParam(NamedString* param)
-    {
-	if (param)
-	    m_params.setUnique(param);
-	return *this;
-    }
+    NamedList& setParam(NamedString* param);
 
     /**
      * Set a named string in the parameter list.
@@ -5107,13 +6665,95 @@ public:
      */
     NamedList& setParam(const String& name, const char* value);
 
+     /**
+     * Set a named string in the parameter list from signed integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, int64_t value);
+
+    /**
+     * Set a named string in the parameter list from unsigned integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, uint64_t value);
+
+    /**
+     * Set a named string in the parameter list from signed integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, int32_t value);
+
+    /**
+     * Set a named string in the parameter list from unsigned integer value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, uint32_t value);
+
+    /**
+     * Set a named string in the parameter list from floating point value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, double value);
+
+    /**
+     * Set a named string in the parameter list from boolean value
+     * @param name Name of the string
+     * @param value Value of the string
+     * @return Reference to this NamedList
+     */
+    inline NamedList& setParam(const String& name, bool value)
+	{ return setParam(name,String::boolText(value)); }
+
+    /**
+     * Set a named string in the parameter list from encoded flags
+     * @param name Name of the string
+     * @param flags The flags
+     * @param tokens The dictionary containing the flags
+     * @param unknownflag True (default) to add unknown flags
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, unsigned int flags, const TokenDict* tokens,
+	bool unknownflag = true);
+
+    /**
+     * Set a named string in the parameter list from encoded flags
+     * @param name Name of the string
+     * @param flags The flags
+     * @param tokens The dictionary containing the flags
+     * @param unknownflag True (default) to add unknown flags
+     * @return Reference to this NamedList
+     */
+    NamedList& setParam(const String& name, uint64_t flags, const TokenDict64* tokens,
+	bool unknownflag = true);
+
+    /**
+     * Set a named string in the parameter list.
+     * @param name Name of the string
+     * @param buf Buffer to hexify
+     * @param len Buffer length
+     * @param sep Optional separator
+     * @return Reference to this NamedList
+     */
+    NamedList& setParamHex(const String& name, const void* buf, unsigned int len, char sep = 0);
+
     /**
      * Clears all instances of a named string in the parameter list.
      * @param name Name of the string to remove
      * @param childSep If set clears all child parameters in format name+childSep+anything
+     * @param value Optional pointer to string used to match parameter's value (may be a regexp)
      * @return Reference to this NamedList
      */
-    NamedList& clearParam(const String& name, char childSep = 0);
+    NamedList& clearParam(const String& name, char childSep = 0, const String* value = 0);
 
     /**
      * Remove a specific parameter
@@ -5134,10 +6774,20 @@ public:
 
     /**
      * Copy all parameters from another NamedList, does not clear list first
+     * @param replace Replace (set params) or append (add param)
+     * @param original NamedList to copy the parameters from
+     * @param copyUserData Copy user data for known objects (DataBlock, XmlElement)
+     * @return Reference to this NamedList
+     */
+    NamedList& copyParams(bool replace, const NamedList& original, bool copyUserData = false);
+
+    /**
+     * Copy all parameters from another NamedList, does not clear list first
      * @param original NamedList to copy the parameters from
      * @return Reference to this NamedList
      */
-    NamedList& copyParams(const NamedList& original);
+    inline NamedList& copyParams(const NamedList& original)
+	{ return copyParams(true,original); }
 
     /**
      * Copy multiple parameters from another NamedList, clears them if not present there
@@ -5513,9 +7163,696 @@ protected:
     mutable int m_port;
 };
 
+class MatchingItemBase;
+class MatchingItemString;
+class MatchingItemRegexp;
+class MatchingItemRandom;
+class MatchingItemList;
+class MatchingItemCustom;
+
+/**
+ * This class holds matching parameters to be passed when matching in item
+ * @short Matching item match parameters
+ */
+class YATE_API MatchingParams : public String
+{
+    YCLASS(MatchingParams,String)
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     */
+    inline MatchingParams(const char* name = 0)
+	: String(name), m_now(0)
+	{}
+
+    uint64_t m_now;                      // Current time to be set when needed
+    ObjList m_params;                    // Arbitray parameters. May be set during matching
+};
+
+/**
+ * This class holds dump matching item parameters
+ * @short Matching item dump parameters
+ */
+class YATE_API MatchingItemDump : public String
+{
+    YCLASS(MatchingItemDump,String)
+public:
+    /**
+     * Dump behaviour flags
+     */
+    enum DumpFlags {
+	NoInitialListDesc = 0x00000001,  // Do not dump list description at depth 0
+    };
+
+    /**
+     * Constructor
+     * @param params Optional parameters
+     * @param name Optional name
+     */
+    inline MatchingItemDump(const NamedList* params = 0, const char* name = 0)
+	: String(name), m_flags(0), m_rexEnclose('/'), m_strEnclose('\''),
+	m_nameValueSep(": "), m_negated('!'), m_caseInsentive('i'),
+	m_regexpBasic(0), m_regexpExtended(0)
+	{
+	    if (params)
+		init(*params);
+	}
+
+    /**
+     * Initialize dumper data
+     * @param params Parameters list
+     */
+    virtual void init(const NamedList& params);
+
+    /**
+     * Dump an item
+     * @param mi Item to dump
+     * @param buf Destination buffer
+     * @param indent Spaces for output
+     * @param origIndent Original indent
+     * @param depth Re-enter depth
+     * @return Destination buffer reference
+     */
+    virtual String& dump(const MatchingItemBase* mi, String& buf,
+	const String& indent = String::empty(), const String& origIndent = String::empty(),
+	unsigned int depth = 0) const;
+
+    /**
+     * Dump an item's value
+     * @param mi Item to dump
+     * @param buf Destination buffer
+     * @param indent Indent for each item (line). Increased by 'origIndent' when depth advances
+     * @param origIndent Original indent
+     * @param depth Re-enter depth
+     * @return Destination buffer reference
+     */
+    virtual String& dumpValue(const MatchingItemBase* mi, String& buf,
+	const String& indent = String::empty(), const String& origIndent = String::empty(),
+	unsigned int depth = 0) const;
+
+    /**
+     * Dump an item
+     * @param mi Item to dump
+     * @param buf Destination buffer
+     * @param indent Indent for each item (line). Increased by 'origIndent' when depth advances
+     * @param origIndent Original indent
+     * @param params Optional dumper parameters parameters
+     * @return Destination buffer reference
+     */
+    static inline String& dumpItem(const MatchingItemBase* mi, String& buf,
+	const String& indent = String::empty(), const String& origIndent = String::empty(),
+	const NamedList* params = 0) {
+	    MatchingItemDump tmp(params);
+	    return tmp.dump(mi,buf,indent,origIndent);
+	}
+
+    unsigned int m_flags;                // Dump flags
+    char m_rexEnclose;                   // Regexp enclose char
+    char m_strEnclose;                   // String enclose char
+    String m_nameValueSep;               // Separator to be set between name and value
+    char m_negated;                      // Negated match value
+    char m_caseInsentive;                // Case insensitive match value
+    char m_regexpBasic;                  // Basic POSIX regexp value
+    char m_regexpExtended;               // Extended POSIX regexp value
+};
+
+/**
+ * Base class for all matching items
+ * @short Matching item common interface
+ */
+class YATE_API MatchingItemBase : public GenObject
+{
+    YCLASS(MatchingItemBase,GenObject)
+    friend class MatchingItemList;
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemBase(const char* name, bool negated = false)
+	: m_name(name), m_notNegated(!negated)
+	{}
+
+    /**
+     * Retrieve the name of this item
+     * @return Item name
+     */
+    inline const String& name() const
+	{ return m_name; }
+
+    /**
+     * Check if this item is negated when testing
+     * @return True if negated, false otherwise
+     */
+    inline bool negated() const
+	{ return !m_notNegated; }
+
+    /**
+     * String match. Handles matching result negation
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return True if matches, false otherwise
+     */
+    inline bool matchString(const String& str, MatchingParams* params = 0) const
+	{ return m_notNegated == runMatchString(str,params); }
+
+    /**
+     * NamedList parameter match. Handles matching result negation
+     * @param list List to search for parameter match
+     * @param params Optional parameters used during match
+     * @return True if matches, false otherwise
+     */
+    inline bool matchListParam(const NamedList& list, MatchingParams* params = 0) const
+	{ return m_notNegated == runMatchListParam(list,params); }
+
+    /**
+     * String match to be implemented by descendants
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return False
+     */
+    virtual bool runMatchString(const String& str, MatchingParams* params = 0) const
+	{ return false; }
+
+    /**
+     * NamedList parameter match
+     * @param list List to search for parameter match
+     * @param params Optional parameters used during match
+     * @return True if matches, false otherwise
+     */
+    virtual bool runMatchListParam(const NamedList& list, MatchingParams* params = 0) const
+	{ return runMatchString(list[name()]); }
+
+    /**
+     * Copy this item
+     * @return MatchingItemBase pointer, NULL if not implemented
+     */
+    virtual MatchingItemBase* copy() const
+	{ return 0; }
+
+    /**
+     * Check if this item is a MatchingItemString one
+     * @return MatchingItemString pointer, NULL if this item is not a MatchingItemString
+     */
+    virtual const MatchingItemString* itemString() const
+	{ return 0; }
+
+    /**
+     * Check if this item is a MatchingItemRegexp one
+     * @return MatchingItemRegexp pointer, NULL if this item is not a MatchingItemRegexp
+     */
+    virtual const MatchingItemRegexp* itemRegexp() const
+	{ return 0; }
+
+    /**
+     * Check if this item is a MatchingItemRandom one
+     * @return MatchingItemRandom pointer
+     */
+    virtual const MatchingItemRandom* itemRandom() const
+	{ return 0; }
+
+    /**
+     * Check if this item is a MatchingItemList one
+     * @return MatchingItemList pointer, NULL if this item is not a MatchingItemList
+     */
+    virtual const MatchingItemList* itemList() const
+	{ return 0; }
+
+    /**
+     * Check if this item is a MatchingItemCustom one
+     * @return MatchingItemCustom pointer
+     */
+    virtual const MatchingItemCustom* itemCustom() const
+	{ return 0; }
+
+    /**
+     * Dump this item
+     * @param buf Destination buffer
+     * @param indent Indent for each item (line). Increased by 'origIndent' when depth advances
+     * @param origIndent Original indent
+     * @param dump Optional dumper
+     * @param depth Re-enter depth
+     * @return Destination buffer reference
+     */
+    virtual String& dump(String& buf, const MatchingItemDump* dump = 0,
+	const String& indent = String::empty(), const String& origIndent = String::empty(),
+	unsigned int depth = 0) const
+	{ return buf; }
+
+    /**
+     * Dump this item's value
+     * @param buf Destination buffer
+     * @param dump Optional dumper
+     * @param indent Indent for each item (line). Increased by 'origIndent' when depth advances
+     * @param origIndent Original indent
+     * @param depth Re-enter depth
+     * @return Destination buffer reference
+     */
+    virtual String& dumpValue(String& buf, const MatchingItemDump* dump = 0,
+	const String& indent = String::empty(), const String& origIndent = String::empty(),
+	unsigned int depth = 0) const
+	{ return buf; }
+
+    /**
+     * Retrieve item name (suitable for list retrieval)
+     * @return Item name
+     */
+    virtual const String& toString() const
+	{ return name(); }
+
+private:
+    String m_name;                       // Item name
+    bool m_notNegated;                   // Item is not negated
+};
+
+/**
+ * Match using a string comparison
+ * @short String comparison matching item
+ */
+class YATE_API MatchingItemString : public MatchingItemBase
+{
+    YCLASS(MatchingItemString,MatchingItemBase)
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     * @param value String to match
+     * @param caseInsensitive Set it to true to do a case insensitive match
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemString(const char* name, const char* value, bool caseInsensitive = false,
+	bool negated = false)
+	: MatchingItemBase(name,negated), m_value(value), m_caseMatch(!caseInsensitive)
+	{}
+
+    /**
+     * Retrieve the string to match
+     * @return String to match
+     */
+    inline const String& value() const
+	{ return m_value; }
+
+    /**
+     * Check if this item is using a case insensitive comparison
+     * @return True if this item is using a case insensitive comparison
+     */
+    inline bool caseInsensitive() const
+	{ return !m_caseMatch; }
+
+    /**
+     * String match
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return True if matched, false otherwise
+     */
+    virtual bool runMatchString(const String& str, MatchingParams* params = 0) const
+	{ return m_caseMatch ? (str == m_value) : (str &= m_value); }
+
+    /**
+     * Copy this item
+     * @return MatchingItemBase pointer
+     */
+    virtual MatchingItemBase* copy() const
+	{ return new MatchingItemString(name(),value(),caseInsensitive(),negated()); }
+
+    /**
+     * Check if this item is a MatchingItemString one
+     * @return MatchingItemString pointer
+     */
+    virtual const MatchingItemString* itemString() const
+	{ return this; }
+
+private:
+    String m_value;                      // String to match
+    bool m_caseMatch;                    // Non case insensitive match
+};
+
+/**
+ * Match using a regular expression
+ * @short A matching item using a regular expression
+ */
+class YATE_API MatchingItemRegexp : public MatchingItemBase
+{
+    YCLASS(MatchingItemRegexp,MatchingItemBase)
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     * @param value Regular expression
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemRegexp(const char* name, const char* value, bool negated = false)
+	: MatchingItemBase(name,negated), m_value(value)
+	{}
+
+    /**
+     * Constructor
+     * @param name Item name
+     * @param value Regular expression
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemRegexp(const char* name, const Regexp& value, bool negated = false)
+	: MatchingItemBase(name,negated), m_value(value)
+	{}
+
+    /**
+     * Retrieve the regular expression used to match
+     * @return Regular expression used to match
+     */
+    inline const Regexp& value() const
+	{ return m_value; }
+
+    /**
+     * String match
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return True if matched, false otherwise
+     */
+    virtual bool runMatchString(const String& str, MatchingParams* params = 0) const
+	{ return m_value.matches(str); }
+
+    /**
+     * Copy this item
+     * @return MatchingItemBase pointer
+     */
+    virtual MatchingItemBase* copy() const
+	{ return new MatchingItemRegexp(name(),value(),negated()); }
+
+    /**
+     * Check if this item is a MatchingItemRegexp one
+     * @return MatchingItemRegexp pointer
+     */
+    virtual const MatchingItemRegexp* itemRegexp() const
+	{ return this; }
+
+    /**
+     * Build a MatchingItemRegexp from string
+     * @param name Item name
+     * @param str Regexp string
+     * @param negated Greater than 0: build a negated match, 0: buid a non negated match,
+     *  negative: build a negated match if str ends with ^
+     * @param insensitive Build a case insensitive regexp
+     * @param extended Build a regexp using extended POSIX
+     * @param fail positive: fail if regexp compile fails, negative fail if empty (do not check the regexp)
+     *   Remember: failed regexp never matches
+     * @return MatchingItemRegexp pointer, NULL on failure
+     */
+    static MatchingItemRegexp* build(const char* name, const String& str, int negated = 0,
+	bool insensitive = false, bool extended = false, int fail = 1);
+
+private:
+    Regexp m_value;                      // Regexp used for matching
+};
+
+/**
+ * Match using a random number
+ * Implements a matching of a reference value greater than RANDOM[0..MAX - 1]
+ * List match and item name set:
+ * Parameter present: use random match
+ * Parameter not present: no match (return false)
+ * @short Random number matching
+ */
+class YATE_API MatchingItemRandom : public MatchingItemBase
+{
+    YCLASS(MatchingItemRandom,MatchingItemBase)
+public:
+    /**
+     * Constructor
+     * Random percent match: val=[PERCENT] maxVal=100
+     * @param val Reference value. 0: never match, 'maxVal' is ignored
+     * @param maxVal Upper interval value. 0, 1, less than / equal to 'val': always match
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     * @param name Item name
+     */
+    inline MatchingItemRandom(uint32_t val, uint32_t maxVal, bool negated = false,
+	const char* name = 0)
+	: MatchingItemBase(name,negated), m_value(val), m_maxVal(maxVal) {
+	    if (!m_value) // Never match
+		m_maxVal = 100;
+	    else if (m_maxVal < 2) // Always match. Avoid division by 0
+		m_value = m_maxVal = 100;
+	}
+
+    /**
+     * Retrieve the reference value used to make a decision
+     * @return The reference value used to make a decision
+     */
+    inline uint32_t value() const
+	{ return m_value; }
+
+    /**
+     * Retrieve the maximum value for random number
+     * @return The maximum value for random number
+     */
+    inline uint32_t maxValue() const
+	{ return m_maxVal; }
+
+    /**
+     * Run the match. Ignore the 'negated' property
+     * @return True if matched, false otherwise
+     */
+    inline bool randomMatch() const
+	{ return value() > (Random::random() % maxValue()); }
+
+    /**
+     * String match
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return True if matched, false otherwise
+     */
+    virtual bool runMatchString(const String& str, MatchingParams* params = 0) const
+	{ return randomMatch(); }
+
+    /**
+     * NamedList parameter match
+     * @param list List to search for parameter match
+     * @param params Optional parameters used during match
+     * @return True if matches, false otherwise
+     */
+    virtual bool runMatchListParam(const NamedList& list, MatchingParams* params = 0) const
+	{ return (!name() || list.getParam(name())) ? randomMatch() : false; }
+
+    /**
+     * Copy this item
+     * @return MatchingItemBase pointer
+     */
+    virtual MatchingItemBase* copy() const
+	{ return new MatchingItemRandom(value(),maxValue(),negated(),name()); }
+
+    /**
+     * Check if this item is a MatchingItemRandom one
+     * @return MatchingItemRandom pointer
+     */
+    virtual const MatchingItemRandom* itemRandom() const
+	{ return this; }
+
+private:
+    uint32_t m_value;                    // Reference value
+    uint32_t m_maxVal;                   // Max value
+};
+
+/**
+ * List of matching items
+ * @short A list of matching items
+ */
+class YATE_API MatchingItemList : public MatchingItemBase
+{
+    YCLASS(MatchingItemList,MatchingItemBase)
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     * @param matchAll True to match all items (logical AND), false to match any item (logical OR)
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemList(const char* name, bool matchAll = true, bool negated = false)
+	: MatchingItemBase(name,negated), m_matchAll(matchAll)
+	{}
+
+    /**
+     * Check if all items must match
+     * @return True if all items must match (logical AND), false if any item matches (logical OR)
+     */
+    inline bool matchAll() const
+	{ return m_matchAll; }
+
+    /**
+     * Retrieve the list length
+     * @return List length
+     */
+    inline unsigned int length() const
+	{ return m_value.length(); }
+
+    /**
+     * Retrieve the number of non empty items in list
+     * @return The number of non empty items in list
+     */
+    inline unsigned int count() const
+	{ return m_value.count(); }
+
+    /**
+     * Retrieve a pointer to item at given index
+     * @param index Index to retrieve
+     * @return MatchingItemBase pointer, NULL if not set or index is out of bounds
+     */
+    inline const MatchingItemBase* at(unsigned int index) const
+	{ return static_cast<MatchingItemBase*>(m_value.at(index)); }
+
+    /**
+     * Retrieve the index of an item found by name
+     * @param name Item name
+     * @return Index of found item, negative if not found
+     */
+    inline int indexOf(const String& name) const
+	{ return m_value.index(name); }
+
+    /**
+     * Find an item by name
+     * @param name Item name
+     * @return MatchingItemBase pointer, NULL if not found
+     */
+    inline const MatchingItemBase* find(const String& name) const {
+	    int idx = indexOf(name);
+	    return idx >= 0 ? at(idx) : 0;
+	}
+
+    /**
+     * Change list (append,insert,replace,remove)
+     * Item is removed if given pointer is NULL, position is valid and 'ins' is false
+     * @param item Item to set, pointer will be consumed
+     * @param pos Item position. Append if negative or past list length
+     * @param ins Set it to true to insert, false to replace or append
+     * @param overAlloc Optional number of items to over allocate
+     *  This parameter is ignored if there is enough space in the list set append the item
+     * @return True on success, false on failure (memory allocation error or NULL pointer given)
+     */
+    bool change(MatchingItemBase* item, int pos = -1, bool ins = false, unsigned int overAlloc = 1);
+
+    /**
+     * Append an item to the list
+     * @param item Item to append, pointer will be consumed
+     * @param overAlloc Optional number of items to over allocate
+     *  This parameter is ignored if there is enough space in the list set append the item
+     * @return True on success, false on failure (memory allocation error or NULL pointer given)
+     */
+    inline bool append(MatchingItemBase* item, unsigned int overAlloc = 1)
+	{ return change(item,-1,false,overAlloc); }
+
+    /**
+     * Set an item at given position
+     * Item is removed if given pointer is NULL
+     * @param item Item to set, pointer will be consumed
+     * @param pos Item position. Append if past list length
+     * @param overAlloc Optional number of items to over allocate
+     *  This parameter is ignored if there is enough space in the list set append the item
+     * @return True on success, false on failure (memory allocation error or NULL pointer given)
+     */
+    inline bool set(MatchingItemBase* item, unsigned int pos, unsigned int overAlloc = 1)
+	{ return change(item,pos,false,overAlloc); }
+
+    /**
+     * Insert an item at list start
+     * @param item Item to insert, pointer will be consumed
+     * @param pos Item position. Append if past list length
+     * @param overAlloc Optional number of items to over allocate
+     *  This parameter is ignored if there is enough space in the list set append the item
+     * @return True on success, false on failure (memory allocation error or NULL pointer given)
+     */
+    inline bool insert(MatchingItemBase* item, unsigned int pos = 0, unsigned int overAlloc = 1)
+	{ return change(item,pos,true,overAlloc); }
+
+    /**
+     * String match
+     * @param str String to match
+     * @param params Optional parameters used during match
+     * @return True if matched, false otherwise
+     */
+    virtual bool runMatchString(const String& str, MatchingParams* params = 0) const;
+
+    /**
+     * NamedList parameter match
+     * @param list List to search for parameter match
+     * @param params Optional parameters used during match
+     * @return True if matches, false otherwise
+     */
+    virtual bool runMatchListParam(const NamedList& list, MatchingParams* params = 0) const;
+
+    /**
+     * Copy this item
+     * @return MatchingItemBase pointer
+     */
+    virtual MatchingItemBase* copy() const;
+
+    /**
+     * Check if this item is a MatchingItemList one
+     * @return MatchingItemList pointer
+     */
+    virtual const MatchingItemList* itemList() const
+	{ return this; }
+
+    /**
+     * Optimize a MatchingItemList
+     * Delete list if empty or there is only one item in it, return the first item in it any
+     * @param list List to optimize
+     * @return MatchingItemBase pointer, may be the list itself if not optimized
+     *  May be NULL if list is empty
+     */
+    static MatchingItemBase* optimize(MatchingItemList* list);
+
+private:
+    ObjVector m_value;                   // List of items to match
+    bool m_matchAll;                     // Match all/any item(s)
+};
+
+/**
+ * Custom match
+ * @short Base class for custom matching
+ */
+class YATE_API MatchingItemCustom : public MatchingItemBase
+{
+    YCLASS(MatchingItemCustom,MatchingItemBase)
+public:
+    /**
+     * Constructor
+     * @param name Item name
+     * @param type Type name
+     * @param negated True if matching is negated (return the opposite of match in
+     *  public methods), false otherwise
+     */
+    inline MatchingItemCustom(const char* name, const char* type, bool negated = false)
+	: MatchingItemBase(name,negated), m_type(type)
+	{}
+
+    /**
+     * Retrieve the type
+     * @return Type name
+     */
+    inline const String& type() const
+	{ return m_type; }
+
+    /**
+     * Check if this item is a MatchingItemCustom one
+     * @return MatchingItemCustom pointer
+     */
+    virtual const MatchingItemCustom* itemCustom() const
+	{ return this; }
+
+private:
+    String m_type;
+};
+
 class MutexPrivate;
 class SemaphorePrivate;
 class ThreadPrivate;
+class RWLockPrivate;
 
 /**
  * An abstract base class for implementing lockable objects
@@ -5977,6 +8314,278 @@ private:
 };
 
 /**
+ * A read/write lock
+ * @short Read/write lock support
+ */
+class YATE_API RWLock : public Lockable
+{
+    friend class RWLockPrivate;
+public:
+    /**
+     * Build a read/write lock
+     * @param name Name of this lock
+     */
+    RWLock(const char* name = 0);
+
+    /**
+     * Copy constructor, creates a RWLock semaphore
+     * @param original Reference of the semaphore to share
+     */
+    RWLock(const RWLock& original);
+
+    /**
+     * Destructor
+     */
+    ~RWLock();
+
+    /**
+     * Unlock either the read or write lock held by the calling thread
+     * @return True if anything was unlocked
+     */
+    bool unlock();
+
+    /**
+     * Lock the read lock.
+     * @param maxWait Time to wait for locking to succeed, -1 to wait forever, 0 return immediately
+     * @return True if locking succeed
+     */
+    bool readLock(long maxWait = -1);
+
+    /**
+     * Lock the write lock.
+     * @param maxWait Time to wait for locking to succeed, -1 to wait forever, 0 return immediately
+     * @return True if locking succeed
+     */
+    bool writeLock(long maxWait = -1);
+
+    /**
+     * Lock the write lock. This behaves like a mutex
+     * @param maxWait Time to wait for locking to succeed, -1 to wait forever, 0 return immediately
+     * @return True if locking succeed
+     */
+    virtual bool lock(long maxWait = -1)
+	{ return writeLock(maxWait); }
+
+    /**
+     * Check if the object is currently locked - as it's asynchronous it
+     *  guarantees nothing if other thread changes the status
+     * @return True if the object was locked when the function was called
+     */
+    virtual bool locked() const;
+
+    /**
+     * Debugging method for disabling RW locks usage
+     * and replacing it with a non-recursive mutex
+     * @param disable True to disable RW locks usage
+     */
+    static void disableRWLock(bool disable);
+
+private:
+    RWLockPrivate* privDataCopy() const;
+    RWLockPrivate* m_private;
+};
+
+/**
+ * Ephemeral read lock on a read-write lock (stack allocated lock that is locked on
+ * creation and unlocked in destructor
+ */
+class RLock
+{
+public:
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Reference to the object to lock
+     * @param maxWait Time in microseconds to wait, -1 wait forever
+     */
+    inline RLock(RWLock& lck, long maxWait = -1)
+ 	{ m_lock = lck.readLock(maxWait) ? &lck : 0; }
+
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Pointer to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     */
+    inline RLock(RWLock* lck, long maxwait = -1)
+	{ m_lock = (lck && lck->readLock(maxwait)) ? lck : 0; }
+
+    /**
+     * Destroy the lock, unlock the mutex if it was locked
+     */
+    ~RLock()
+	{ if (m_lock) m_lock->unlock(); }
+
+    /**
+     * Return a pointer to the lockable object this lock holds
+     * @return A pointer to a Lockable or NULL if locking failed
+     */
+    inline RWLock* locked() const
+	{ return m_lock; }
+
+    /**
+     * Unlock the object if it was locked and drop the reference to it
+     */
+    inline void drop()
+	{ if (m_lock) m_lock->unlock(); m_lock = 0; }
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Pointer to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(RWLock* lck, long maxwait = -1)
+	{ return (lck && (lck == m_lock)) ||
+	    (drop(),(lck && (m_lock = lck->readLock(maxwait) ? lck : 0))); }
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Reference to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(RWLock& lck, long maxwait = -1)
+	{ return acquire(&lck,maxwait); }
+
+private:
+    RWLock* m_lock;
+
+    /** Make sure no Lock is ever created on heap */
+    inline void* operator new(size_t);
+
+    /** Never allocate an array of this class */
+    inline void* operator new[](size_t);
+};
+
+/**
+ * Ephemeral read lock on a read-write lock (stack allocated lock that is locked on
+ * creation and unlocked in destructor
+ */
+class WLock
+{
+public:
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Reference to the object to lock
+     * @param maxWait Time in microseconds to wait, -1 wait forever
+     */
+    inline WLock(RWLock& lck, long maxWait = -1)
+ 	{ m_lock = lck.writeLock(maxWait) ? &lck : 0; }
+
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Pointer to the object to lock
+     * @param maxWait Time in microseconds to wait, -1 wait forever
+     */
+    inline WLock(RWLock* lck, long maxWait = -1)
+	{ m_lock = (lck && lck->writeLock(maxWait)) ? lck : 0; }
+
+    /**
+     * Destroy the lock, unlock the mutex if it was locked
+     */
+    ~WLock()
+	{ if (m_lock) m_lock->unlock(); }
+
+    /**
+     * Return a pointer to the lockable object this lock holds
+     * @return A pointer to a Lockable or NULL if locking failed
+     */
+    inline RWLock* locked() const
+	{ return m_lock; }
+
+    /**
+     * Unlock the object if it was locked and drop the reference to it
+     */
+    inline void drop()
+	{ if (m_lock) m_lock->unlock(); m_lock = 0; }
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Pointer to the object to lock
+     * @param maxWait Time in microseconds to wait, -1 wait forever
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(RWLock* lck, long maxWait = -1)
+	{ return (lck && (lck == m_lock)) ||
+	    (drop(),(lck && (m_lock = lck->writeLock(maxWait) ? lck : 0))); }
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Reference to the object to lock
+     * @param maxWait Time in microseconds to wait, -1 wait forever
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(RWLock& lck, long maxWait = -1)
+	{ return acquire(&lck,maxWait); }
+
+private:
+    RWLock* m_lock;
+
+    /** Make sure no Lock is ever created on heap */
+    inline void* operator new(size_t);
+
+    /** Never allocate an array of this class */
+    inline void* operator new[](size_t);
+};
+
+/**
+ * This class holds a RWLock array. Locks can be retrieved based on object pointers.
+ * A lock pool can be used to associate a smaller set of RWLock objects with a much
+ *  larger set of objects needing lock.
+ * @short A RWLock pool
+ */
+class YATE_API RWLockPool
+{
+public:
+    /**
+     * Build the lock pool
+     * @param len The number of lock objects to build. The length should be an
+     *  odd number to obtain an optimal distribution of pointer based locks
+     *  (usually pointers are aligned at even addresses): some locks might never
+     *  get used if the length is an even number
+     * @param name Static name of the lock (for debugging purpose only)
+     */
+    RWLockPool(unsigned int len = 13, const char* name = 0);
+
+    /**
+     * Destructor. Release data
+     */
+    ~RWLockPool();
+
+    /**
+     * Build an index from object pointer (pointer value modulo array length).
+     * Always cast the pointer to the same type when calling this method to
+     *  make sure the same index is returned for a given object
+     * @param ptr The pointer to object
+     * @return Valid array index
+     */
+    inline unsigned int index(void* ptr) const
+	{ return ((unsigned int)(unsigned long)ptr) % m_length; }
+
+    /**
+     * Retrieve the lock associated with a given pointer.
+     * Always cast the pointer to the same type when calling this method to
+     *  make sure the same lock is returned for a given object
+     * @param ptr The pointer to object
+     * @return Valid RWLock pointer
+     */
+    inline RWLock* lock(void* ptr) const
+	{ return m_data[index(ptr)]; }
+
+    /**
+     * Retrieve the lock at a given index modulo array length
+     * @param idx The index
+     * @return Valid RWLock pointer
+     */
+    inline RWLock* lock(unsigned int idx) const
+	{ return m_data[idx % m_length]; }
+
+private:
+    String* m_name;                      // RWLock names
+    RWLock** m_data;                     // The array
+    unsigned int m_length;               // Array length
+};
+
+/**
  * This class holds the action to execute a certain task, usually in a
  *  different execution thread.
  * @short Encapsulates a runnable task
@@ -6007,6 +8616,7 @@ class YATE_API Thread : public Runnable
     friend class ThreadPrivate;
     friend class MutexPrivate;
     friend class SemaphorePrivate;
+    friend class RWLockPrivate;
     YNOCOPY(Thread); // no automatic copies please
 public:
     /**
@@ -6564,12 +9174,36 @@ public:
 
     /**
      * Get the host and port of this address
-     * @return Address String (host:port)
+     * @param full Retrieve the full address, interface included
+     * @return Address String (host:port or host%iface:port)
      */
-    inline const String& addr() const {
-	    if (!m_addr)
-		updateAddr();
-	    return m_addr;
+    inline const String& addr(bool full = false) const {
+	    const String& s = full ? m_addrFull : m_addr;
+	    if (!s)
+		updateAddr(full);
+	    return s;
+	}
+
+    /**
+     * Get the interface to use for this address
+     * @return Interface to use for this address
+     */
+    inline const String& iface() const
+	{ return m_iface; }
+
+    /**
+     * Set the interface to use for this address
+     * @param name Interface to use for this address
+     * @param uriUnescape Set it to true to URI unescape the value
+     * @return True on success, false otherwise
+     */
+    inline bool iface(const char* name, bool uriUnescape = false) {
+	    m_iface = name;
+	    if (!m_iface || !uriUnescape)
+		return true;
+	    int e = -1;
+	    m_iface.uriUnescapeStr(false,&e);
+	    return e < 0;
 	}
 
     /**
@@ -6700,9 +9334,11 @@ public:
      * @param buf Destination buffer
      * @param addr Address to append
      * @param family Address family, set it to Unknown to detect
+     * @param iface Optional interface name
      * @return Buffer address
      */
-    static String& appendAddr(String& buf, const String& addr, int family = Unknown);
+    static String& appendAddr(String& buf, const String& addr, int family = Unknown,
+	const String& iface = String::empty());
 
     /**
      * Append an address to a buffer in the form addr:port
@@ -6710,11 +9346,12 @@ public:
      * @param addr Address to append
      * @param port Port to append
      * @param family Address family, set it to Unknown to detect
+     * @param iface Optional interface name
      * @return Buffer address
      */
     static inline String& appendTo(String& buf, const String& addr, int port,
-	int family = Unknown) {
-	    appendAddr(buf,addr,family) << ":" << port;
+	int family = Unknown, const String& iface = String::empty()) {
+	    appendAddr(buf,addr,family,iface) << ":" << port;
 	    return buf;
 	}
 
@@ -6723,12 +9360,13 @@ public:
      * @param addr Address to append
      * @param port Port to append
      * @param family Address family, set it to Unknown to detect
+     * @param iface Optional interface name
      * @return A String with concatenated address and port
      */
-    static inline String appendTo(const String& addr, int port, int family = Unknown) {
+    static inline String appendTo(const String& addr, int port, int family = Unknown,
+	const String& iface = String::empty()) {
 	    String buf;
-	    appendTo(buf,addr,port,family);
-	    return buf;
+	    return appendTo(buf,addr,port,family,iface);
 	}
 
     /**
@@ -6752,7 +9390,7 @@ public:
     /**
      * Split an address into ip/port.
      * Handled formats: addr, addr:port, [addr], [addr]:port
-     * It is safe call this method with the same destination and source string
+     * It is safe to call this method with the same destination and source string
      * @param buf Source buffer
      * @param addr Destination buffer for address
      * @param port Destination port
@@ -6788,6 +9426,22 @@ public:
      */
     static const TokenDict* dictFamilyName();
 
+    /**
+     * Retrieve the string for interface name extra URI escape in address
+     * @return Interface name extra URI escape in address
+     */
+    static inline const char* ifaceNameExtraEscape()
+	{ return s_ifaceNameExtraEscape; }
+
+    /**
+     * Escape an interface name
+     * @param buf Destination buffer
+     * @param name Interface name
+     * @return Destination buffer reference
+     */
+    static inline String& escapeIface(String& buf, const char* name)
+	{ return String::uriEscapeTo(buf,name,ifaceNameExtraEscape()); }
+
 protected:
     /**
      * Convert the host address to a String stored in m_host
@@ -6796,16 +9450,21 @@ protected:
 
     /**
      * Store host:port in m_addr
+     * Store host%iface:port in m_addrFull
+     * @param full Build the full addr
      */
-    virtual void updateAddr() const;
+    virtual void updateAddr(bool full = false) const;
 
     struct sockaddr* m_address;
     socklen_t m_length;
     String m_host;
+    String m_iface;
     mutable String m_addr;
+    mutable String m_addrFull;
 
 private:
     static const TokenDict s_familyName[];
+    static const char* s_ifaceNameExtraEscape;
 };
 
 /**
@@ -6849,7 +9508,19 @@ public:
      * @param adrlen Length of the valid data in address structure
      * @return True if this filter claimed the data
      */
-    virtual bool received(void* buffer, int length, int flags, const struct sockaddr* addr, socklen_t adrlen) = 0;
+    virtual bool received(const void* buffer, int length, int flags, const struct sockaddr* addr, socklen_t adrlen) = 0;
+
+    /**
+     * Notify this filter about a sent block of data
+     * @param buffer Buffer with sent data
+     * @param length Length of the data in buffer
+     * @param flags Operating system specific bit flags of the operation
+     * @param addr Address where the data was sent, may be NULL
+     * @param adrlen Length of the valid data in address structure
+     * @return True if this filter claimed the data
+     */
+    virtual bool sent(const void* buffer, int length, int flags, const struct sockaddr* addr, socklen_t adrlen)
+	{ return false; }
 
     /**
      * Get the socket to which the filter is currently attached
@@ -7407,6 +10078,17 @@ public:
     };
 
     /**
+     * Platform specific available features
+     */
+    enum Features {
+	FProtoIpv6           = 0x0001, // IPv6 protocol (IPPROTO_IPV6) socket option
+	FIpv6Only            = 0x0002, // IPv6 only socket option
+	FBindToIface         = 0x0004, // Bind to specific interface for non IPv6
+	FEfficientSelect     = 0x0008, // Efficient select() is available
+	FExclusiveAddrUse    = 0x0010, // Exclusive access may be indicated in reuse
+    };
+
+    /**
      * Default constructor, creates an invalid socket
      */
     Socket();
@@ -7609,11 +10291,34 @@ public:
 
     /**
      * Associates the socket with a local address
+     * Optionally associates the socket with a local interface (device)
+     * @param addr Address to assign to this socket
+     * @param addrlen Length of the address structure
+     * @param iface Interface to bind to, may start with '#' for an interface index
+     * @param ifLen Interface string length, -1 to detect
+     * @return True if operation was successfull, false if an error occured
+     */
+    virtual bool bind(struct sockaddr* addr, socklen_t addrlen,
+	const char* iface, int ifLen = -1);
+
+    /**
+     * Associates the socket with a local address
+     * Optionally associates the socket with a local interface (device) if configured
      * @param addr Address to assign to this socket
      * @return True if operation was successfull, false if an error occured
      */
     inline bool bind(const SocketAddr& addr)
-	{ return bind(addr.address(), addr.length()); }
+	{ return bind(addr.address(),addr.length(),addr.iface(),addr.iface().length()); }
+
+    /**
+     * Associates the socket with a local interface (device)
+     * @param iface Interface to bind to, may start with '#' for an interface index
+     * @param ifLen Interface string length, -1 to detect
+     * @param family Address family
+     * NOTE: IPv6 family is ignored, it should be set in address specific field (scope id)
+     * @return True if operation was successfull, false if an error occured
+     */
+    virtual bool bindIface(const char* iface, int ifLen = -1, int family = SocketAddr::Unknown);
 
     /**
      * Start listening for incoming connections on the socket
@@ -7635,7 +10340,7 @@ public:
      * @param addr Address to fill in with the address of the incoming connection
      * @return Open socket to the new connection or NULL on failure
      */
-    Socket* accept(SocketAddr& addr);
+    virtual Socket* accept(SocketAddr& addr);
 
     /**
      * Create a new socket for an incoming connection attempt on a listening socket
@@ -7752,6 +10457,13 @@ public:
     bool getPeerName(SocketAddr& addr);
 
     /**
+     * Retrieve the name of the interface this socket is bound to
+     * @param buf Destination string
+     * @return True if operation was successfull, false if an error occured
+     */
+    virtual bool getBoundIface(String& buf);
+
+    /**
      * Send a message over a connected or unconnected socket
      * @param buffer Buffer for data transfer
      * @param length Length of the buffer
@@ -7864,8 +10576,9 @@ public:
 
     /**
      * Removes and destroys all packet filters
+     * @param del True to delete packet filters
      */
-    void clearFilters();
+    void clearFilters(bool del = true);
 
     /**
      * Run whatever actions required on idle thread runs.
@@ -7883,6 +10596,13 @@ public:
      * @return True is the stream pair was created successfully
      */
     static bool createPair(Socket& sock1, Socket& sock2, int domain = AF_UNIX);
+
+    /**
+     * Retrieve available features
+     * @return Available features mask
+     */
+    static inline unsigned int features()
+	{ return s_features; }
 
 protected:
 
@@ -7906,12 +10626,17 @@ protected:
      * @param flags Operating system specific bit flags of the operation
      * @param addr Address of the incoming data, may be NULL
      * @param adrlen Length of the valid data in address structure
+     * @param rx True if data was received, false if data was transmitted
      * @return True if one of the filters claimed the data
      */
-    bool applyFilters(void* buffer, int length, int flags, const struct sockaddr* addr = 0, socklen_t adrlen = 0);
+    bool applyFilters(const void* buffer, int length, int flags, const struct sockaddr* addr = 0,
+	socklen_t adrlen = 0, bool rx = true);
 
     SOCKET m_handle;
     ObjList m_filters;
+
+private:
+    static unsigned int s_features;
 };
 
 /**
@@ -8774,6 +11499,124 @@ public:
      */
     static double runTime(Type type = WallTime);
 
+};
+
+/**
+ * CaptureInfo class allows passing information about a captured packet
+ * @short Data associated with a captured packet
+ */
+class YATE_API CaptureInfo
+{
+public:
+    /**
+     * Constructor
+     * @param ts Timestamp when packet was captures/created in microseconds
+     * @param srcAddr Source address of the packet
+     * @param dstAddr Destination address of the packet
+     * @param extra Extra parameters
+     */
+    CaptureInfo(uint64_t ts = Time::now(), SocketAddr* srcAddr = 0,
+	    SocketAddr* dstAddr = 0, const NamedList& extra = NamedList::empty())
+	: m_ts(ts), m_srcAddr(srcAddr), m_dstAddr(dstAddr), m_extraInfo(extra)
+	{ }
+
+    /**
+     * Retrieve the source address
+     * @return The source address of the packet
+     */
+    inline SocketAddr* srcAddr() const
+	{ return m_srcAddr; }
+
+    /**
+     * Retrieve the destination address of this packet
+     * @return The destination address of the packet
+     */
+    inline SocketAddr* dstAddr() const
+	{ return m_dstAddr; }
+
+    /**
+     * Get the extra information parameters
+     * @return The extra information parameters
+     */
+    inline const NamedList& extraInfo() const
+	{ return m_extraInfo; }
+
+    /**
+     * Timestamp in microseconds when this packet was captured
+     * @return The timestamp of this packet
+     */
+    inline uint64_t ts() const
+	{ return m_ts; }
+
+    /**
+     * Source port of this packet
+     * @return Source port of this packet, 0 if not known
+     */
+    inline uint16_t srcPort() const
+	{ return srcAddr() ? srcAddr()->port() : 0; }
+
+    /**
+     * Destination port of this packet
+     * @return Destination port of this packet, 0 if not known
+     */
+    inline uint16_t dstPort() const
+	{ return dstAddr() ? dstAddr()->port() : 0; }
+
+private:
+    uint64_t m_ts;
+    SocketAddr* m_srcAddr;
+    SocketAddr* m_dstAddr;
+    NamedList m_extraInfo;
+};
+
+/**
+ * Capture class allows implementing capturing of packets
+ * @short Packet capture class
+ */
+class YATE_API Capture : public RefObject
+{
+    YCLASS(Capture,RefObject);
+
+public:
+    /**
+     * Constructor
+     * @param name Name of capture
+     */
+    Capture(const char* name)
+    : m_name(name)
+	{ }
+
+    /**
+     * Initialize this capture
+     * @param params Parameters for initializing this capture
+     * @return True on succesful initialization, false otherwise
+     */
+    virtual bool initialize(const NamedList& params) = 0;
+
+    /**
+     * Write to capture a packet
+     * @param data Packet data
+     * @param len Length of packet data
+     * @param info Captured packet associated information
+     * @return True if written in capture, false otherwise
+     */
+    virtual bool write(const uint8_t* data, unsigned int len, const CaptureInfo& info) = 0;
+
+    /**
+     * Check if capture is still valid
+     * @return True if still valid, false otherwise
+     */
+    virtual bool valid() const = 0;
+
+    /**
+     * Get the name of the capture
+     * @return Name of the capture
+     */
+    virtual const String& name() const
+	{ return m_name; }
+
+private:
+    String m_name;
 };
 
 }; // namespace TelEngine

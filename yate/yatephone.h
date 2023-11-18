@@ -5,7 +5,7 @@
  * Drivers, channels and telephony related classes
  *
  * Yet Another Telephony Engine - a fully featured software PBX and IVR
- * Copyright (C) 2004-2014 Null Team
+ * Copyright (C) 2004-2023 Null Team
  *
  * This software is distributed under multiple licenses;
  * see the COPYING file in the main directory for licensing
@@ -1509,26 +1509,29 @@ protected:
      * Install a standard message relay
      * @param id RelayID of the new relay to create
      * @param priority Priority of the handler, 0 = top
+     * @param filter Optional filter for relay. It will be consumed
      * @return True if installed or already was one installed
      */
-    bool installRelay(int id, unsigned priority = 100);
+    bool installRelay(int id, unsigned priority = 100, NamedString* filter = 0);
 
     /**
      * Install a standard message relay
      * @param name Name of the relay to create, must match a RelayID
      * @param priority Priority of the handler, 0 = top
+     * @param filter Optional filter for relay. It will be consumed
      * @return True if installed or already was one installed
      */
-    bool installRelay(const char* name, unsigned priority = 100);
+    bool installRelay(const char* name, unsigned priority = 100, NamedString* filter = 0);
 
     /**
      * Install a custom message relay
      * @param id RelayID of the new relay to create
      * @param name Name of the custom relay to create
      * @param priority Priority of the handler, 0 = top
+     * @param filter Optional filter for relay. It will be consumed
      * @return True if installed or already was one installed
      */
-    bool installRelay(int id, const char* name, unsigned priority = 100);
+    bool installRelay(int id, const char* name, unsigned priority = 100, NamedString* filter = 0);
 
     /**
      * Install a custom message relay

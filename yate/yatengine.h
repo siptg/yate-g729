@@ -5,7 +5,7 @@
  * Engine, plugins and messages related classes
  *
  * Yet Another Telephony Engine - a fully featured software PBX and IVR
- * Copyright (C) 2004-2014 Null Team
+ * Copyright (C) 2004-2023 Null Team
  *
  * This software is distributed under multiple licenses;
  * see the COPYING file in the main directory for licensing
@@ -39,6 +39,7 @@ namespace TelEngine {
  */
 class YATE_API Configuration : public String
 {
+    friend class Engine;
     YNOCOPY(Configuration); // no automatic copies please
 public:
     /**
@@ -226,24 +227,36 @@ public:
     bool save() const;
 
 private:
+    /**
+     * Load the main configuration file
+     * @param warn True to also warn if the configuration could not be loaded
+     * @return True if successfull, false for failure
+     */
+    inline bool loadMain(bool warn = true) {
+	    m_main = true;
+	    return load(warn);
+	}
+
     ObjList *getSectHolder(const String& sect) const;
     ObjList *makeSectHolder(const String& sect);
-    bool loadFile(const char* file, String sect, unsigned int depth, bool warn);
+    bool loadFile(const char* file, String sect, unsigned int depth, bool warn, void* priv);
     ObjList m_sections;
+    bool m_main;
 };
 
 /**
  * Class that implements atomic / locked access and operations to its shared variables
  * @short Atomic access and operations to shared variables
  */
-class YATE_API SharedVars : public Mutex
+class YATE_API SharedVars : public Mutex, public RefObject
 {
 public:
     /**
      * Constructor
+     * @param name Optional name
      */
-    inline SharedVars()
-	: Mutex(false,"SharedVars"), m_vars("")
+    inline SharedVars(const char* name = 0)
+	: Mutex(false,"SharedVars"), m_vars(name)
 	{ }
 
     /**
@@ -275,6 +288,11 @@ public:
     void clear(const String& name);
 
     /**
+     * Clear all variables. Does nothing for Engine (global shared list)
+     */
+    void clearAll();
+
+    /**
      * Check if a variable exists
      * @param name Name of the variable
      * @return True if the variable exists
@@ -287,7 +305,7 @@ public:
      * @param wrap Value to wrap around at, zero disables
      * @return Value of the variable before increment, zero if it was not defined or not numeric
      */
-    unsigned int inc(const String& name, unsigned int wrap = 0);
+    uint64_t inc(const String& name, uint64_t wrap = 0);
 
     /**
      * Atomically decrement a variable as unsigned integer
@@ -295,7 +313,56 @@ public:
      * @param wrap Value to wrap around at, zero disables (stucks at zero)
      * @return Value of the variable after decrement, zero if it was not defined or not numeric
      */
-    unsigned int dec(const String& name, unsigned int wrap = 0);
+    uint64_t dec(const String& name, uint64_t wrap = 0);
+
+    /**
+     * Atomically add a value to a variable as unsigned integer
+     * @param name Name of the variable
+     * @param val Value to add
+     * @param wrap Value to wrap around at, zero disables
+     * @return Value of the variable before addition, zero if it was not defined or not numeric
+     */
+    uint64_t add(const String& name, uint64_t val, uint64_t wrap = 0);
+
+    /**
+     * Atomically substract a value from a variable as unsigned integer
+     * @param name Name of the variable
+     * @param val Value to substract
+     * @param wrap Value to wrap around at, zero disables
+     * @return Value of the variable after substraction, zero if it was not defined or not numeric
+     */
+    uint64_t sub(const String& name, uint64_t val, uint64_t wrap = 0);
+
+    /**
+     * Atomically copy parameters to destination
+     * @param dest Destination list
+     * @param prefix Optional prefix to match in parameter names
+     * @param skipPrefix Skip over the prefix when building new parameter name
+     * @param replace Set to true to replace list parameter instead of adding a new one
+     */
+    inline void copy(NamedList& dest, const String& prefix = String::empty(),
+	bool skipPrefix = true, bool replace = false) {
+	    Lock lck(this);
+	    if (prefix)
+		dest.copySubParams(m_vars,prefix,skipPrefix,replace);
+	    else
+		dest.copyParams(m_vars);
+	}
+
+    /**
+     * Retrieve list name
+     * @return List name
+     */
+    virtual const String& toString() const
+	{ return m_vars; }
+
+    /**
+     * Retrieve a named list of SharedVars. Create it if not found
+     * @param dest Destination to be filled with requested list
+     * @param name Name of the list
+     * @return True id destination is iset. The function will fail if name is empty
+     */
+    static bool getList(RefPointer<SharedVars>& dest, const String& name);
 
 private:
     NamedList m_vars;
@@ -403,6 +470,13 @@ public:
 	{ return m_broadcast; }
 
     /**
+     * Reset message. This method should be used when message is going to be re-dispatched.
+     * Reset message time, track param, return value.
+     * @param tm Time to set, defaults to current time
+     */
+    void resetMsg(Time tm = Time::now());
+
+    /**
      * Retrieve a reference to the creation time of the message.
      * @return A reference to the @ref Time when the message was created
      */
@@ -415,6 +489,38 @@ public:
      */
     inline const Time& msgTime() const
 	{ return m_time; }
+
+    /**
+     * Retrieve a reference to the time when message was put in dispatcher.
+     * @return A reference to the @ref Time when the message was put in dispatcher queue.
+     * May be 0 if the message was not put in queue or time tracking is not enabled in dispatcher
+     */
+    inline Time& msgTimeEnqueue()
+	{ return m_timeEnqueue; }
+
+    /**
+     * Retrieve a const reference to the time when message was put in dispatcher.
+     * @return A reference to the @ref Time when the message was put in dispatcher queue.
+     * May be 0 if the message was not put in queue or time tracking is not enabled in dispatcher
+     */
+    inline const Time& msgTimeEnqueue() const
+	{ return m_timeEnqueue; }
+
+    /**
+     * Retrieve a reference to the time when message was dispatched.
+     * @return A reference to the @ref Time when the message was dispatched
+     * May be 0 if the message was not dispatched yet or time tracking is not enabled in dispatcher
+     */
+    inline Time& msgTimeDispatch()
+	{ return m_timeDispatch; }
+
+    /**
+     * Retrieve a const reference to the time when message was dispatched.
+     * @return A reference to the @ref Time when the message was dispatched
+     * May be 0 if the message was not dispatched yet or time tracking is not enabled in dispatcher
+     */
+    inline const Time& msgTimeDispatch() const
+	{ return m_timeDispatch; }
 
     /**
      * Name assignment operator
@@ -482,6 +588,8 @@ private:
     Message& operator=(const Message& value); // no assignment please
     String m_return;
     Time m_time;
+    Time m_timeEnqueue;
+    Time m_timeDispatch;
     RefObject* m_data;
     bool m_notify;
     bool m_broadcast;
@@ -544,12 +652,28 @@ public:
 	{ return m_trackName; }
 
     /**
+     * Retrieve the tracking name of this handler without added priority
+     * @return Name that is to be used in tracking operation
+     */
+    inline const String& trackNameOnly() const
+	{ return m_trackNameOnly; }
+
+    /**
      * Set a new tracking name for this handler.
      * Works only if the handler was not yet inserted into a dispatcher
      * @param name Name that is to be used in tracking operation
      */
-    inline void trackName(const char* name)
-	{ if (!m_dispatcher) m_trackName = name; }
+    inline void trackName(const char* name) {
+	    if (m_dispatcher)
+		return;
+	    m_trackName = name;
+	    String tmp;
+	    tmp << ':' << priority();
+	    if (m_trackName.endsWith(tmp))
+		m_trackNameOnly = m_trackName.substr(0,m_trackName.length() - tmp.length());
+	    else
+		m_trackNameOnly = m_trackName;
+	}
 
     /**
      * Retrive the objects counter associated to this handler
@@ -560,15 +684,22 @@ public:
 
     /**
      * Retrieve the filter (if installed) associated to this handler
+     * @return MatchingItemBase pointer, NULL if not set
      */
-    inline const NamedString* filter() const
+    inline const MatchingItemBase* filter() const
 	{ return m_filter; }
 
     /**
-     * Retrieve the Regexp filter (if installed) associated to this handler
+     * Set a filters list associated to this handler
+     * @param filter Pointer to the filters list to install, will be owned and
+     *  destroyed by the handler
      */
-    inline const Regexp* filterRegexp() const
-	{ return m_filterRegexp; }
+    inline void setFilter(MatchingItemBase* filter) {
+	    if (filter == m_filter)
+		return;
+	    clearFilter();
+	    m_filter = filter;
+	}
 
     /**
      * Set a filter for this handler
@@ -583,14 +714,12 @@ public:
      * @param value Value of the parameter to filter
      */
     inline void setFilter(const char* name, const char* value)
-	{ setFilter(new NamedString(name,value)); }
+	{ setFilter(new MatchingItemString(name,value)); }
 
     /**
      * Remove and destroy any filter associated to this handler
      */
     void clearFilter();
-
-    virtual void cancelDeferred(Message& msg) {}
 
     virtual bool deferSupport() const
         { return false; }
@@ -616,13 +745,12 @@ protected:
 
 private:
     String m_trackName;
+    String m_trackNameOnly;
     unsigned m_priority;
-    int m_unsafe;
+    AtomicInt m_unsafe;
     MessageDispatcher* m_dispatcher;
-    NamedString* m_filter;
-    Regexp* m_filterRegexp;
+    MatchingItemBase* m_filter;
     NamedCounter* m_counter;
-    ObjList m_deferred_messages;
 };
 
 /**
@@ -639,8 +767,6 @@ public:
      * @return True to stop processing, false to try other handlers
      */
     virtual bool received(Message& msg, int id) = 0;
-
-    virtual void cancelDeferred(Message& msg) {}
 
     virtual bool deferSupport() const
         { return false; }
@@ -692,9 +818,6 @@ public:
      */
     virtual bool receivedInternal(Message& msg);
 
-    virtual void cancelDeferred(Message& msg)
-        { if (m_receiver) m_receiver->cancelDeferred(msg); }
-
     virtual bool deferSupport() const
         { return m_receiver && m_receiver->deferSupport(); }
 
@@ -741,7 +864,7 @@ class YATE_API MessagePostHook : public RefObject, public MessageNotifier
  *  messages that are typically dispatched by a separate thread.
  * @short A message dispatching hub
  */
-class YATE_API MessageDispatcher : public GenObject, public Mutex
+class YATE_API MessageDispatcher : public GenObject
 {
     friend class Engine;
     YNOCOPY(MessageDispatcher); // no automatic copies please
@@ -821,10 +944,23 @@ public:
 	{ m_warnTime = usec; }
 
     /**
+     * Enable or disable message events time (queued / dispatch)
+     * @param on True to enable, false to disable
+     */
+    inline void traceTime(bool on = false)
+	{ m_traceTime = on; }
+
+    /**
+     * Enable or disable message handler duration
+     * @param on True to enable, false to disable
+     */
+    inline void traceHandlerTime(bool on = false)
+	{ m_traceHandlerTime = on; }
+
+    /**
      * Clear all the message handlers and post-dispatch hooks
      */
-    inline void clear()
-	{ m_handlers.clear(); m_hookAppend = &m_hooks; m_hooks.clear(); }
+    void clear();
 
     /**
      * Check if there is at least one message in the queue
@@ -902,6 +1038,13 @@ public:
 	{ return usec ? m_msgAvgAge : ((m_msgAvgAge + 500) / 1000); }
 
     /**
+     * Retrieve the handlers list lock object
+     * @return Handlers list lock object reference
+     */
+    inline RWLock& handlersLock()
+	{ return m_handlersLock; }
+
+    /**
      * Retrieve all statistics counters
      * @param enqueued Returns count of enqueued messages
      * @param dequeued Returns count of dequeued messages
@@ -917,6 +1060,17 @@ public:
      */
     void setHook(MessagePostHook* hook, bool remove = false);
 
+    /**
+     * Fill handlers status info
+     * @param matchName True to match message name, false to match handler trackname
+     * @param match Value to match. May be a regular expression
+     * @param details Optional pointer to string to be filled with details
+     * @param total Optional pointer to data to be filled with total number of handlers
+     * @return The number of matched handlers
+     */
+    unsigned int fillHandlersInfo(bool matchName, const String& match, String* details = 0,
+	unsigned int* total = 0);
+
 protected:
     /**
      * Set the tracked parameter name
@@ -929,7 +1083,9 @@ private:
     ObjList m_handlers;
     ObjList m_messages;
     ObjList m_hooks;
-    Mutex m_hookMutex;
+    RWLock m_handlersLock;
+    RWLock m_messagesLock;
+    RWLock m_hooksLock;
     ObjList* m_msgAppend;
     ObjList* m_hookAppend;
     String m_trackParam;
@@ -940,6 +1096,8 @@ private:
     u_int64_t m_dispatchCount;
     u_int64_t m_queuedMax;
     u_int64_t m_msgAvgAge;
+    bool m_traceTime;
+    bool m_traceHandlerTime;
     int m_hookCount;
     bool m_hookHole;
 };
@@ -1699,6 +1857,13 @@ public:
      * @return Halt code
      */
     static int cleanupLibrary();
+
+    /**
+     * Retrieve common Engine dispatcher
+     * @return MessageDispatcher pointer, NULL if not set
+     */
+    static inline MessageDispatcher* dispatcher()
+	{ return s_self ? &(s_self->m_dispatcher) : 0; }
 
 protected:
     /**
